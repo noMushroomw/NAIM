@@ -28,9 +28,9 @@ echo "GPUs: $NUM_GPUS"
 echo "Data: $DATA_PATH"
 echo "=============================================="
 
-# Fix dill version
-echo ">>> Fixing dill version..."
-pip install dill==0.3.6 --break-system-packages -q 2>/dev/null || pip install dill==0.3.6 -q
+# Fix dill version - NO LONGER NEEDED (patch is in scripts)
+# echo ">>> Fixing dill version..."
+# pip install dill==0.3.6 --break-system-packages -q 2>/dev/null || pip install dill==0.3.6 -q
 
 # Verify PyTorch
 python -c "import torch; print(f'PyTorch {torch.__version__} OK')"

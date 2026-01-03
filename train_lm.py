@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+# =============================================================================
+# Dill Compatibility Patch (MUST be before any torch imports)
+# =============================================================================
+import sys
+def _patch_dill():
+    try:
+        import dill
+        if not hasattr(dill, 'extend'):
+            dill.extend = lambda use_dill=True: None
+    except ImportError:
+        pass
+_patch_dill()
+# =============================================================================
+
 """
 Section 4.4: Autoregressive Language Modeling
 ==============================================
