@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 """
 Section 4.2: Vision-Language Contrastive Learning (LiT)
-========================================================
+=======================================================
 
-Following LION paper Section 4.2:
-- LiT (Locked-image Text Tuning) with ViT-B/32 image encoder
-- Contrastive learning on image-text pairs
-- Zero-shot evaluation on ImageNet and CIFAR-100
+Following LION Paper Section 4.2:
+- LiT (Locked-image Text Tuning)
+- ViT-B/32 image encoder (frozen)
+- Text encoder (trained)
 
 Usage:
-    torchrun --nproc_per_node=8 train_lit.py --optimizer all
+    torchrun --nproc_per_node=8 train_lit.py --optimizer all --epochs 30
 """
 
 import os
-import sys
 import time
 import math
 import random
 import json
+import logging
 import argparse
 from pathlib import Path
-from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -32,46 +31,62 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.optim import Optimizer
 import torchvision.transforms as T
-from torchvision.datasets import ImageFolder, CIFAR100
+from torchvision.datasets import ImageFolder
 
 import warnings
 warnings.filterwarnings('ignore')
 
 
 # =============================================================================
-# 1. Optimizers (same as train_rlo.py)
+# Logging
+# =============================================================================
+
+def setup_logger(output_dir, rank, name):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    
+    fh = logging.FileHandler(output_dir / f"{name}_rank{rank}.log", mode='w')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s'))
+    logger.addHandler(fh)
+    
+    if rank == 0:
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(logging.Formatter('%(asctime)s | %(message)s', datefmt='%H:%M:%S'))
+        logger.addHandler(ch)
+    
+    return logger
+
+
+# =============================================================================
+# Optimizers
 # =============================================================================
 
 class RLO(Optimizer):
-    def __init__(self, params, lr=1e-4, betas=(0.9, 0.99), weight_decay=0.1,
-                 belief_coef=0.1, eps=1e-8):
-        defaults = dict(lr=lr, betas=betas, weight_decay=weight_decay,
-                        belief_coef=belief_coef, eps=eps)
+    def __init__(self, params, lr=1e-4, betas=(0.9, 0.99), weight_decay=0.1, belief_coef=0.1, eps=1e-8):
+        defaults = dict(lr=lr, betas=betas, weight_decay=weight_decay, belief_coef=belief_coef, eps=eps)
         super().__init__(params, defaults)
 
     @torch.no_grad()
     def step(self, closure=None):
         for group in self.param_groups:
-            lr, wd = group["lr"], group["weight_decay"]
-            beta1, beta2 = group["betas"]
-            belief, eps = group["belief_coef"], group["eps"]
-
             for p in group["params"]:
                 if p.grad is None:
                     continue
                 g = p.grad
                 state = self.state[p]
                 if len(state) == 0:
-                    state["exp_avg"] = torch.zeros_like(p)
-                m = state["exp_avg"]
-                if wd != 0.0:
-                    p.mul_(1.0 - lr * wd)
-                c = beta1 * m + (1.0 - beta1) * g
+                    state["m"] = torch.zeros_like(p)
+                m = state["m"]
+                if group["weight_decay"] != 0:
+                    p.mul_(1 - group["lr"] * group["weight_decay"])
+                c = group["betas"][0] * m + (1 - group["betas"][0]) * g
                 delta = g - m
-                delta_norm = delta.norm(p=2).clamp(min=eps)
-                d = c.sign() + belief * (delta / delta_norm)
-                p.add_(d, alpha=-lr)
-                m.mul_(beta2).add_(g, alpha=(1.0 - beta2))
+                update = c.sign() + group["belief_coef"] * (delta / delta.norm().clamp(min=group["eps"]))
+                p.add_(update, alpha=-group["lr"])
+                m.mul_(group["betas"][1]).add_(g, alpha=1 - group["betas"][1])
 
 
 class RLO_LambdaA(Optimizer):
@@ -80,49 +95,35 @@ class RLO_LambdaA(Optimizer):
         defaults = dict(lr=lr, beta1=beta1, beta2=beta2, beta3=beta3,
                         weight_decay=weight_decay, lambda_b=lambda_b, eps=eps, gamma=gamma)
         super().__init__(params, defaults)
-        self._init_sqrt_dim()
-
-    def _init_sqrt_dim(self):
-        total = sum(p.numel() for g in self.param_groups for p in g["params"])
-        self.sqrt_dim = math.sqrt(total)
+        self.sqrt_dim = math.sqrt(sum(p.numel() for g in self.param_groups for p in g["params"]))
 
     @torch.no_grad()
     def step(self, closure=None):
-        all_smooth_pre, all_belief, all_params = [], [], []
+        all_sp, all_b, all_p = [], [], []
         for group in self.param_groups:
-            eps, gamma = group["eps"], group["gamma"]
-            beta1, beta2, beta3, lambda_b = group["beta1"], group["beta2"], group["beta3"], group["lambda_b"]
             for p in group["params"]:
                 if p.grad is None:
                     continue
                 g = p.grad
                 state = self.state[p]
                 if len(state) == 0:
-                    state["m"] = torch.zeros_like(p)
-                    state["s"] = torch.zeros_like(p)
+                    state["m"], state["s"] = torch.zeros_like(p), torch.zeros_like(p)
                 m, s = state["m"], state["s"]
-                s.mul_(beta3).addcmul_(g, g, value=(1.0 - beta3))
-                c = beta1 * m + (1.0 - beta1) * g
-                smooth = torch.tanh(gamma * c)
-                smooth_pre = smooth / (s.sqrt() + eps)
+                s.mul_(group["beta3"]).addcmul_(g, g, value=1 - group["beta3"])
+                c = group["beta1"] * m + (1 - group["beta1"]) * g
+                sp = torch.tanh(group["gamma"] * c) / (s.sqrt() + group["eps"])
                 delta = g - m
-                delta_norm = delta.norm(p=2).clamp(min=eps)
-                belief = lambda_b * (delta / delta_norm)
-                all_smooth_pre.append(smooth_pre)
-                all_belief.append(belief)
-                all_params.append((p, group))
-        if not all_params:
+                b = group["lambda_b"] * (delta / delta.norm().clamp(min=group["eps"]))
+                all_sp.append(sp); all_b.append(b); all_p.append((p, group, m))
+        if not all_p:
             return
-        s_norm = sum((sp * sp).sum() for sp in all_smooth_pre).sqrt().clamp(min=1e-8)
-        scale = self.sqrt_dim / s_norm
-        for (p, group), sp, b in zip(all_params, all_smooth_pre, all_belief):
-            lr, wd, beta2 = group["lr"], group["weight_decay"], group["beta2"]
-            d = scale * sp + b
-            state = self.state[p]
-            if wd != 0.0:
-                p.mul_(1.0 - lr * wd)
-            p.add_(d, alpha=-lr)
-            state["m"].mul_(beta2).add_(p.grad, alpha=(1.0 - beta2))
+        scale = self.sqrt_dim / sum((x * x).sum() for x in all_sp).sqrt().clamp(min=1e-8)
+        for (p, group, m), sp, b in zip(all_p, all_sp, all_b):
+            update = scale * sp + b
+            if group["weight_decay"] != 0:
+                p.mul_(1 - group["lr"] * group["weight_decay"])
+            p.add_(update, alpha=-group["lr"])
+            m.mul_(group["beta2"]).add_(p.grad, alpha=1 - group["beta2"])
 
 
 class SmoothLiftedRLO(Optimizer):
@@ -131,48 +132,36 @@ class SmoothLiftedRLO(Optimizer):
         defaults = dict(lr=lr, beta1=beta1, beta2=beta2, eta=eta,
                         weight_decay=weight_decay, lambda_b=lambda_b, eps=eps, gamma=gamma)
         super().__init__(params, defaults)
-        self._init_sqrt_dim()
-
-    def _init_sqrt_dim(self):
-        total = sum(p.numel() for g in self.param_groups for p in g["params"])
-        self.sqrt_dim = math.sqrt(total)
+        self.sqrt_dim = math.sqrt(sum(p.numel() for g in self.param_groups for p in g["params"]))
 
     @torch.no_grad()
     def step(self, closure=None):
-        all_s, all_b, all_params = [], [], []
+        all_s, all_b, all_p = [], [], []
         for group in self.param_groups:
-            eps, gamma, beta1, lambda_b = group["eps"], group["gamma"], group["beta1"], group["lambda_b"]
             for p in group["params"]:
                 if p.grad is None:
                     continue
                 g = p.grad
                 state = self.state[p]
                 if len(state) == 0:
-                    state["m"] = torch.zeros_like(p)
-                    state["v"] = torch.zeros_like(p)
+                    state["m"], state["v"] = torch.zeros_like(p), torch.zeros_like(p)
                 m = state["m"]
-                c = beta1 * m + (1.0 - beta1) * g
-                s = torch.tanh(gamma * c)
+                c = group["beta1"] * m + (1 - group["beta1"]) * g
+                s = torch.tanh(group["gamma"] * c)
                 delta = g - m
-                delta_norm = delta.norm(p=2).clamp(min=eps)
-                b = lambda_b * (delta / delta_norm)
-                all_s.append(s)
-                all_b.append(b)
-                all_params.append((p, group))
-        if not all_params:
+                b = group["lambda_b"] * (delta / delta.norm().clamp(min=group["eps"]))
+                all_s.append(s); all_b.append(b); all_p.append((p, group))
+        if not all_p:
             return
-        s_norm = sum((s * s).sum() for s in all_s).sqrt().clamp(min=1e-8)
-        scale = self.sqrt_dim / s_norm
-        for (p, group), s, b in zip(all_params, all_s, all_b):
-            lr, wd, eta, beta2 = group["lr"], group["weight_decay"], group["eta"], group["beta2"]
-            d = scale * s + b
+        scale = self.sqrt_dim / sum((x * x).sum() for x in all_s).sqrt().clamp(min=1e-8)
+        for (p, group), s, b in zip(all_p, all_s, all_b):
+            update = scale * s + b
             state = self.state[p]
-            m, v = state["m"], state["v"]
-            if wd != 0.0:
-                p.mul_(1.0 - lr * wd)
-            v.mul_(1.0 - eta).add_(d, alpha=eta)
-            p.add_(v, alpha=-lr)
-            m.mul_(beta2).add_(p.grad, alpha=(1.0 - beta2))
+            if group["weight_decay"] != 0:
+                p.mul_(1 - group["lr"] * group["weight_decay"])
+            state["v"].mul_(1 - group["eta"]).add_(update, alpha=group["eta"])
+            p.add_(state["v"], alpha=-group["lr"])
+            state["m"].mul_(group["beta2"]).add_(p.grad, alpha=1 - group["beta2"])
 
 
 class Lion(Optimizer):
@@ -191,58 +180,53 @@ class Lion(Optimizer):
                 g = p.grad
                 state = self.state[p]
                 if len(state) == 0:
-                    state['exp_avg'] = torch.zeros_like(p)
-                m = state['exp_avg']
+                    state['m'] = torch.zeros_like(p)
+                m = state['m']
                 beta1, beta2 = group['betas']
-                update = (beta1 * m + (1 - beta1) * g).sign_()
-                p.add_(update, alpha=-group['lr'])
+                p.add_((beta1 * m + (1 - beta1) * g).sign_(), alpha=-group['lr'])
                 m.mul_(beta2).add_(g, alpha=1 - beta2)
 
 
 # =============================================================================
-# 2. Vision Transformer (Image Encoder)
+# Models
 # =============================================================================
 
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8):
         super().__init__()
         self.num_heads = num_heads
-        self.head_dim = dim // num_heads
         self.qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
 
     def forward(self, x):
         B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         x = F.scaled_dot_product_attention(q, k, v)
         return self.proj(x.transpose(1, 2).reshape(B, N, C))
 
 
 class Block(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio=4.):
+    def __init__(self, dim, num_heads):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = Attention(dim, num_heads)
         self.norm2 = nn.LayerNorm(dim)
-        hidden = int(dim * mlp_ratio)
-        self.mlp = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
+        self.mlp = nn.Sequential(nn.Linear(dim, dim * 4), nn.GELU(), nn.Linear(dim * 4, dim))
 
     def forward(self, x):
         x = x + self.attn(self.norm1(x))
         return x + self.mlp(self.norm2(x))
 
 
-class VisionTransformer(nn.Module):
-    """ViT-B/32 for image encoding"""
-    def __init__(self, img_size=224, patch_size=32, embed_dim=768, depth=12, num_heads=12):
+class VisionEncoder(nn.Module):
+    """ViT-B/32 image encoder"""
+    def __init__(self, embed_dim=768):
         super().__init__()
-        self.embed_dim = embed_dim
-        num_patches = (img_size // patch_size) ** 2
-        self.patch_embed = nn.Conv2d(3, embed_dim, patch_size, patch_size)
+        self.patch_embed = nn.Conv2d(3, embed_dim, 32, 32)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
-        self.blocks = nn.ModuleList([Block(embed_dim, num_heads) for _ in range(depth)])
+        self.pos_embed = nn.Parameter(torch.zeros(1, 50, embed_dim))
+        self.blocks = nn.ModuleList([Block(embed_dim, 12) for _ in range(12)])
         self.norm = nn.LayerNorm(embed_dim)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.cls_token, std=0.02)
@@ -254,354 +238,199 @@ class VisionTransformer(nn.Module):
         x = x + self.pos_embed
         for blk in self.blocks:
             x = blk(x)
-        return self.norm(x[:, 0])
+        return F.normalize(self.norm(x[:, 0]), dim=-1)
 
 
-# =============================================================================
-# 3. Text Encoder (Transformer)
-# =============================================================================
-
-class TextTransformer(nn.Module):
-    """Simple text transformer for CLIP-style encoding"""
-    def __init__(self, vocab_size=49408, context_length=77, embed_dim=512, 
-                 depth=12, num_heads=8, output_dim=768):
+class TextEncoder(nn.Module):
+    """Text Transformer"""
+    def __init__(self, vocab_size=49408, context_len=77, embed_dim=512, output_dim=768):
         super().__init__()
-        self.context_length = context_length
-        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
-        self.pos_embedding = nn.Parameter(torch.zeros(1, context_length, embed_dim))
-        self.blocks = nn.ModuleList([Block(embed_dim, num_heads) for _ in range(depth)])
+        self.token_emb = nn.Embedding(vocab_size, embed_dim)
+        self.pos_emb = nn.Parameter(torch.zeros(1, context_len, embed_dim))
+        self.blocks = nn.ModuleList([Block(embed_dim, 8) for _ in range(12)])
         self.norm = nn.LayerNorm(embed_dim)
         self.proj = nn.Linear(embed_dim, output_dim, bias=False)
-        nn.init.trunc_normal_(self.pos_embedding, std=0.02)
+        nn.init.trunc_normal_(self.pos_emb, std=0.02)
 
-    def forward(self, text):
-        # text: [B, L] token ids
-        x = self.token_embedding(text) + self.pos_embedding[:, :text.shape[1]]
+    def forward(self, x):
+        x = self.token_emb(x) + self.pos_emb[:, :x.shape[1]]
         for blk in self.blocks:
             x = blk(x)
-        # Take features from EOT token (last non-padding)
-        x = self.norm(x)
-        # Simplified: just take mean
-        x = x.mean(dim=1)
-        return self.proj(x)
+        return F.normalize(self.proj(self.norm(x).mean(dim=1)), dim=-1)
 
-
-# =============================================================================
-# 4. LiT Model (Locked-image Text tuning)
-# =============================================================================
 
 class LiT(nn.Module):
-    """
-    LiT: Locked-image Text tuning
-    - Image encoder is frozen (pretrained)
-    - Text encoder is trained
-    - Contrastive loss between image and text embeddings
-    """
+    """Locked-image Text tuning"""
     def __init__(self, embed_dim=768, temperature=0.07):
         super().__init__()
-        # ViT-B/32 image encoder (will be frozen)
-        self.image_encoder = VisionTransformer(patch_size=32, embed_dim=embed_dim)
-        # Text encoder (will be trained)
-        self.text_encoder = TextTransformer(output_dim=embed_dim)
-        # Learnable temperature
+        self.image_encoder = VisionEncoder(embed_dim)
+        self.text_encoder = TextEncoder(output_dim=embed_dim)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / temperature))
 
-    def encode_image(self, image):
-        return F.normalize(self.image_encoder(image), dim=-1)
-
-    def encode_text(self, text):
-        return F.normalize(self.text_encoder(text), dim=-1)
-
     def forward(self, image, text):
-        image_features = self.encode_image(image)
-        text_features = self.encode_text(text)
-        
-        logit_scale = self.logit_scale.exp()
-        logits_per_image = logit_scale * image_features @ text_features.t()
-        logits_per_text = logits_per_image.t()
-        
-        return logits_per_image, logits_per_text
-
-
-def contrastive_loss(logits_per_image, logits_per_text):
-    """CLIP-style contrastive loss"""
-    batch_size = logits_per_image.shape[0]
-    labels = torch.arange(batch_size, device=logits_per_image.device)
-    loss_i = F.cross_entropy(logits_per_image, labels)
-    loss_t = F.cross_entropy(logits_per_text, labels)
-    return (loss_i + loss_t) / 2
+        img_feat = self.image_encoder(image)
+        txt_feat = self.text_encoder(text)
+        scale = self.logit_scale.exp()
+        return scale * img_feat @ txt_feat.t(), scale * txt_feat @ img_feat.t()
 
 
 # =============================================================================
-# 5. Dataset (Simplified - using ImageNet with synthetic text)
+# Dataset
 # =============================================================================
 
-# ImageNet class names (subset for demo)
-IMAGENET_CLASSES = [
-    "tench", "goldfish", "great white shark", "tiger shark", "hammerhead",
-    "electric ray", "stingray", "cock", "hen", "ostrich",
-    # ... (would include all 1000 classes in full implementation)
-]
+TEMPLATES = ["a photo of a {}.", "a picture of a {}.", "an image of a {}."]
 
 
 class ImageTextDataset(Dataset):
-    """
-    Image-Text dataset for contrastive learning.
-    Uses ImageNet images with template-based text descriptions.
-    """
     def __init__(self, root, split='train', transform=None):
         self.dataset = ImageFolder(root / split, transform=transform)
-        self.templates = [
-            "a photo of a {}.",
-            "a picture of a {}.",
-            "an image of a {}.",
-            "a {} in the wild.",
-            "a photograph of a {}.",
-        ]
-        # Simple tokenizer (in practice, use CLIP tokenizer)
-        self.vocab = self._build_vocab()
-        self.context_length = 77
-        
-    def _build_vocab(self):
-        # Simplified vocabulary
-        vocab = {'<pad>': 0, '<sos>': 1, '<eos>': 2, '<unk>': 3}
-        idx = 4
-        words = set()
-        for template in self.templates:
-            for word in template.replace('.', '').replace(',', '').split():
-                words.add(word.lower())
-        for cls_name in IMAGENET_CLASSES:
-            for word in cls_name.replace('_', ' ').split():
-                words.add(word.lower())
-        for word in sorted(words):
-            vocab[word] = idx
-            idx += 1
-        return vocab
-    
+        self.context_len = 77
+
     def tokenize(self, text):
-        """Simple tokenization"""
-        tokens = [self.vocab.get('<sos>')]
-        for word in text.replace('.', '').replace(',', '').lower().split():
-            tokens.append(self.vocab.get(word, self.vocab['<unk>']))
-        tokens.append(self.vocab.get('<eos>'))
-        # Pad or truncate
-        if len(tokens) < self.context_length:
-            tokens += [self.vocab['<pad>']] * (self.context_length - len(tokens))
-        else:
-            tokens = tokens[:self.context_length]
-        return torch.tensor(tokens, dtype=torch.long)
-    
+        tokens = [1]
+        for word in text.lower().replace('.', '').split()[:20]:
+            tokens.append(hash(word) % 49400 + 4)
+        tokens.append(2)
+        tokens += [0] * (self.context_len - len(tokens))
+        return torch.tensor(tokens[:self.context_len], dtype=torch.long)
+
     def __len__(self):
         return len(self.dataset)
-    
+
     def __getitem__(self, idx):
-        image, label = self.dataset[idx]
-        # Get class name (simplified - would use actual ImageNet class names)
-        class_name = f"class_{label}"
-        if label < len(IMAGENET_CLASSES):
-            class_name = IMAGENET_CLASSES[label]
-        # Random template
-        template = random.choice(self.templates)
-        text = template.format(class_name.replace('_', ' '))
-        tokens = self.tokenize(text)
-        return image, tokens, label
+        img, label = self.dataset[idx]
+        text = random.choice(TEMPLATES).format(f"class {label}")
+        return img, self.tokenize(text), label
 
 
 # =============================================================================
-# 6. Zero-shot Evaluation
+# Training
 # =============================================================================
 
-@torch.no_grad()
-def zero_shot_evaluate(model, loader, class_names, device, templates=None):
-    """
-    Zero-shot classification evaluation.
-    """
-    if templates is None:
-        templates = ["a photo of a {}."]
-    
-    model.eval()
-    
-    # Build text features for all classes
-    text_features_list = []
-    for class_name in class_names:
-        class_texts = [t.format(class_name) for t in templates]
-        # Simplified: just use first template
-        # In practice, average over all templates
-        tokens = torch.zeros(1, 77, dtype=torch.long, device=device)
-        text_features = model.encode_text(tokens)
-        text_features_list.append(text_features)
-    
-    text_features = torch.cat(text_features_list, dim=0)
-    text_features = F.normalize(text_features, dim=-1)
-    
-    correct = 0
-    total = 0
-    
-    for images, _, labels in loader:
-        images = images.to(device)
-        labels = labels.to(device)
-        
-        image_features = model.encode_image(images)
-        similarity = image_features @ text_features.t()
-        pred = similarity.argmax(dim=-1)
-        
-        correct += (pred == labels).sum().item()
-        total += labels.size(0)
-    
-    return 100.0 * correct / total
+def contrastive_loss(logits_i, logits_t):
+    labels = torch.arange(logits_i.shape[0], device=logits_i.device)
+    return (F.cross_entropy(logits_i, labels) + F.cross_entropy(logits_t, labels)) / 2
 
 
-# =============================================================================
-# 7. Training
-# =============================================================================
+CONFIGS = {
+    'adamw': {'lr': 1e-3, 'wd': 0.1},
+    'lion': {'lr': 1e-4, 'wd': 1.0},
+    'rlo': {'lr': 1e-4, 'wd': 1.0},
+    'rlo_lambda_a': {'lr': 1e-4, 'wd': 1.0},
+    'smooth_lifted_rlo': {'lr': 1e-4, 'wd': 1.0},
+}
 
-def create_optimizer(model, opt_name: str, lr: float, wd: float):
-    # Only train text encoder (LiT setting)
-    params = model.text_encoder.parameters()
-    
-    if opt_name == 'adamw':
+
+def create_optimizer(params, name, lr, wd):
+    if name == 'adamw':
         return torch.optim.AdamW(params, lr=lr, weight_decay=wd)
-    elif opt_name == 'lion':
+    elif name == 'lion':
         return Lion(params, lr=lr, weight_decay=wd)
-    elif opt_name == 'rlo':
+    elif name == 'rlo':
         return RLO(params, lr=lr, weight_decay=wd)
-    elif opt_name == 'rlo_lambda_a':
+    elif name == 'rlo_lambda_a':
         return RLO_LambdaA(params, lr=lr, weight_decay=wd)
-    elif opt_name == 'smooth_lifted_rlo':
+    elif name == 'smooth_lifted_rlo':
         return SmoothLiftedRLO(params, lr=lr, weight_decay=wd)
-    else:
-        raise ValueError(f"Unknown optimizer: {opt_name}")
+    raise ValueError(f"Unknown: {name}")
 
 
-def train_lit(
-    opt_name: str,
-    data_path: Path,
-    output_dir: Path,
-    epochs: int = 30,
-    batch_size: int = 4096,
-    warmup_epochs: int = 3,
-    rank: int = 0,
-    world_size: int = 1,
-    local_rank: int = 0,
-):
-    """Train LiT model"""
+def train_lit(opt_name, data_path, output_dir, epochs, rank, world_size, local_rank, logger):
     device = torch.device(f'cuda:{local_rank}')
-    
-    # Hyperparameters (from LION paper)
-    configs = {
-        'adamw': {'lr': 1e-3, 'wd': 0.1},
-        'lion': {'lr': 1e-4, 'wd': 1.0},
-        'rlo': {'lr': 1e-4, 'wd': 1.0},
-        'rlo_lambda_a': {'lr': 1e-4, 'wd': 1.0},
-        'smooth_lifted_rlo': {'lr': 1e-4, 'wd': 1.0},
-    }
-    config = configs[opt_name]
-    batch_size_per_gpu = batch_size // world_size
-    
-    if rank == 0:
-        print(f"\n{'='*60}")
-        print(f"LiT Training: {opt_name}")
-        print(f"lr={config['lr']}, wd={config['wd']}, batch={batch_size}")
-        print(f"{'='*60}")
-    
+    cfg = CONFIGS[opt_name]
+    global_batch, per_gpu = 4096, 4096 // world_size
+
+    logger.info("=" * 60)
+    logger.info(f"LiT Training: {opt_name}")
+    logger.info(f"LR: {cfg['lr']}, WD: {cfg['wd']}, Global batch: {global_batch}")
+    logger.info("=" * 60)
+
     # Data
     transform = T.Compose([
-        T.RandomResizedCrop(224),
-        T.RandomHorizontalFlip(),
-        T.ToTensor(),
-        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        T.RandomResizedCrop(224), T.RandomHorizontalFlip(),
+        T.ToTensor(), T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     ])
-    
-    train_dataset = ImageTextDataset(data_path, 'train', transform)
-    
-    if world_size > 1:
-        sampler = DistributedSampler(train_dataset)
-    else:
-        sampler = None
-    
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size_per_gpu, shuffle=(sampler is None),
-        sampler=sampler, num_workers=8, pin_memory=True, drop_last=True,
-    )
-    
+    dataset = ImageTextDataset(data_path, 'train', transform)
+    sampler = DistributedSampler(dataset, world_size, rank) if world_size > 1 else None
+    loader = DataLoader(dataset, per_gpu, shuffle=(sampler is None), sampler=sampler,
+                       num_workers=8, pin_memory=True, drop_last=True, persistent_workers=True)
+
+    logger.info(f"Train: {len(dataset)} samples, {len(loader)} steps/epoch")
+
     # Model
     model = LiT().to(device)
-    
-    # Freeze image encoder (LiT setting)
-    for param in model.image_encoder.parameters():
-        param.requires_grad = False
-    
+    for p in model.image_encoder.parameters():
+        p.requires_grad = False
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank])
-    
-    # Optimizer (only for text encoder)
+
     base_model = model.module if hasattr(model, 'module') else model
-    optimizer = create_optimizer(base_model, opt_name, config['lr'], config['wd'])
-    
+    optimizer = create_optimizer(base_model.text_encoder.parameters(), opt_name, cfg['lr'], cfg['wd'])
+
     # Scheduler
-    total_steps = len(train_loader) * epochs
-    warmup_steps = len(train_loader) * warmup_epochs
-    
+    total_steps = len(loader) * epochs
+    warmup_steps = len(loader) * 3
+
     def get_lr(step):
         if step < warmup_steps:
-            return config['lr'] * step / warmup_steps
-        progress = (step - warmup_steps) / (total_steps - warmup_steps)
-        return config['lr'] * 0.5 * (1 + math.cos(math.pi * progress))
-    
+            return cfg['lr'] * step / max(1, warmup_steps)
+        return cfg['lr'] * 0.5 * (1 + math.cos(math.pi * (step - warmup_steps) / (total_steps - warmup_steps)))
+
     scaler = torch.amp.GradScaler('cuda')
-    global_step = 0
-    history = {'loss': []}
-    
+    history = {'loss': [], 'lr': [], 'epoch_time': []}
+    step = 0
+
     for epoch in range(epochs):
-        if sampler is not None:
+        if sampler:
             sampler.set_epoch(epoch)
-        
         model.train()
-        # But keep image encoder in eval mode
         base_model.image_encoder.eval()
-        
-        epoch_loss = 0.0
-        
-        for images, tokens, _ in train_loader:
-            images = images.to(device)
-            tokens = tokens.to(device)
-            
-            # Update LR
-            lr = get_lr(global_step)
+        loss_sum = 0.0
+        t0 = time.time()
+
+        for batch_idx, (imgs, tokens, _) in enumerate(loader):
+            imgs = imgs.to(device, non_blocking=True)
+            tokens = tokens.to(device, non_blocking=True)
+
+            lr = get_lr(step)
             for g in optimizer.param_groups:
                 g['lr'] = lr
-            
-            optimizer.zero_grad()
-            
+
+            optimizer.zero_grad(set_to_none=True)
+
             with torch.autocast('cuda', torch.bfloat16):
-                logits_i, logits_t = model(images, tokens)
+                logits_i, logits_t = model(imgs, tokens)
                 loss = contrastive_loss(logits_i, logits_t)
-            
+
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(base_model.text_encoder.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
-            
-            epoch_loss += loss.item()
-            global_step += 1
-        
-        avg_loss = epoch_loss / len(train_loader)
+
+            loss_sum += loss.item()
+            step += 1
+
+            if rank == 0 and (batch_idx + 1) % 100 == 0:
+                logger.debug(f"E{epoch+1} S{batch_idx+1}: loss={loss.item():.4f}")
+
+        epoch_time = time.time() - t0
+        avg_loss = loss_sum / len(loader)
         history['loss'].append(avg_loss)
-        
-        if rank == 0:
-            print(f"Epoch {epoch+1}/{epochs}: loss={avg_loss:.4f}")
-    
-    # Save results
+        history['lr'].append(lr)
+        history['epoch_time'].append(epoch_time)
+
+        logger.info(f"Epoch {epoch+1}/{epochs}: loss={avg_loss:.4f}, time={epoch_time:.1f}s")
+
+    # Save
     if rank == 0:
-        results = {
-            'optimizer': opt_name,
-            'final_loss': history['loss'][-1],
-            'history': history,
-        }
+        results = {'optimizer': opt_name, 'config': cfg, 'final_loss': history['loss'][-1],
+                  'total_time': sum(history['epoch_time']), 'history': history}
         with open(output_dir / f"lit_{opt_name}_results.json", 'w') as f:
             json.dump(results, f, indent=2)
-    
+        torch.save(base_model.state_dict(), output_dir / f"lit_{opt_name}_model.pt")
+        logger.info(f"Final loss: {history['loss'][-1]:.4f}")
+
     return history['loss'][-1]
 
 
@@ -612,48 +441,41 @@ def main():
     parser.add_argument('--output', default='./results_lit')
     parser.add_argument('--epochs', type=int, default=30)
     args = parser.parse_args()
-    
-    # Setup
+
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
-    
-    random.seed(42)
-    np.random.seed(42)
-    torch.manual_seed(42)
-    
-    # Distributed
+    random.seed(42); np.random.seed(42); torch.manual_seed(42)
+
     if 'RANK' in os.environ:
-        rank = int(os.environ['RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
-        local_rank = int(os.environ['LOCAL_RANK'])
+        rank, world_size, local_rank = int(os.environ['RANK']), int(os.environ['WORLD_SIZE']), int(os.environ['LOCAL_RANK'])
         torch.cuda.set_device(local_rank)
         dist.init_process_group('nccl')
     else:
         rank, world_size, local_rank = 0, 1, 0
-    
-    data_path = Path(args.data)
+
     output_dir = Path(args.output)
     output_dir.mkdir(exist_ok=True, parents=True)
-    
-    optimizers = ['adamw', 'lion', 'rlo', 'rlo_lambda_a', 'smooth_lifted_rlo'] if args.optimizer == 'all' else [args.optimizer]
-    
+    logger = setup_logger(output_dir, rank, "lit")
+
+    opts = list(CONFIGS.keys()) if args.optimizer == 'all' else [args.optimizer]
     results = {}
-    for opt in optimizers:
+    
+    for opt in opts:
         try:
-            loss = train_lit(opt, data_path, output_dir, args.epochs, rank=rank, 
-                           world_size=world_size, local_rank=local_rank)
+            loss = train_lit(opt, Path(args.data), output_dir, args.epochs, rank, world_size, local_rank, logger)
             results[opt] = loss
         except Exception as e:
-            if rank == 0:
-                print(f"Error {opt}: {e}")
-    
+            logger.error(f"Error {opt}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
     if rank == 0 and results:
-        print("\n" + "="*60)
-        print("LiT Results (Final Loss)")
+        logger.info("=" * 60)
+        logger.info("LiT Results (Loss)")
         for opt, loss in sorted(results.items(), key=lambda x: x[1]):
-            print(f"  {opt}: {loss:.4f}")
-    
+            logger.info(f"  {opt}: {loss:.4f}")
+
     if dist.is_initialized():
         dist.destroy_process_group()
 
