@@ -1,62 +1,51 @@
 #!/bin/bash
 #SBATCH --job-name=rlo_cls
-#SBATCH --output=logs/cls_%j.out
-#SBATCH --error=logs/cls_%j.err
+#SBATCH --partition=hpg-b200
+#SBATCH --gpus=8
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=256GB
-#SBATCH --gpus=8
-#SBATCH --partition=gpu
-#SBATCH --time=72:00:00
-#SBATCH --account=wdixon
-#SBATCH --qos=wdixon
+#SBATCH --cpus-per-task=36
+#SBATCH --mem=280gb
+#SBATCH --time=144:00:00
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-user=williamsw2179@gmail.com
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
 
 # =============================================================================
-# Section 4.1: Image Classification (ResNet-50, ViT-S/16, ViT-B/16)
-# =============================================================================
-# Log locations:
-#   SLURM: logs/cls_<JOB_ID>.out, logs/cls_<JOB_ID>.err
-#   Training: results_classification/*_rank0.log
+# Section 4.1: Image Classification
+# Log: cat rlo_cls-<JOB_ID>.out
+# Training log: cat results_classification/*_rank0.log
 # =============================================================================
 
-cd $SLURM_SUBMIT_DIR
-mkdir -p logs results_classification
+hostname;date;pwd
 
-source ~/.bashrc
+module load python conda cuda/12.8
+export XDG_RUNTIME_DIR="${SLURM_TMPDIR}"
 conda activate ly
 
-# Fix dill compatibility (inline, no external script needed)
+# Fix dill compatibility
 python << 'PATCH'
 import site, os
-patch = """
-try:
-    import dill
-    if not hasattr(dill, 'extend'):
-        dill.extend = lambda use_dill=True: None
-except ImportError:
-    pass
-"""
+patch = "try:\n    import dill\n    if not hasattr(dill, 'extend'):\n        dill.extend = lambda use_dill=True: None\nexcept ImportError:\n    pass\n"
 path = os.path.join(site.getsitepackages()[0], 'sitecustomize.py')
 if not os.path.exists(path):
-    with open(path, 'w') as f:
-        f.write(patch)
+    with open(path, 'w') as f: f.write(patch)
     print(f"Created dill patch: {path}")
-else:
-    print(f"Patch exists: {path}")
 PATCH
 
-echo "=============================================="
-echo "Job: $SLURM_JOB_ID | Node: $SLURM_NODELIST"
-echo "Start: $(date)"
-echo "=============================================="
-nvidia-smi --query-gpu=name,memory.total --format=csv
+mkdir -p results_classification
 
 DATA="/blue/wdixon/wang.yixuan/lypcdf/imagenet_folder"
 OUT="./results_classification"
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export OMP_NUM_THREADS=8
+export OMP_NUM_THREADS=4
+
+echo "=============================================="
+echo "PyTorch: $(python -c 'import torch; print(torch.__version__)')"
+nvidia-smi --query-gpu=name,memory.total --format=csv
+echo "=============================================="
 
 echo ">>> ResNet-50 (90 epochs)"
 torchrun --nproc_per_node=8 --master_port=29500 \
