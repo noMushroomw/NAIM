@@ -2,5 +2,6 @@ test.*
 test1.*
 data/
 *.json
-optimizer_comparison.png
+*.png
 results/
+*.pt

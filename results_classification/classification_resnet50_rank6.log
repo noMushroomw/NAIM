@@ -1,0 +1,307 @@
+2026-01-03 04:57:49 | INFO     | PyTorch 2.8.0+cu128 | CUDA 12.8
+2026-01-03 04:57:49 | INFO     | World size: 8 | Data: /blue/wdixon/wang.yixuan/lypcdf/imagenet_folder
+2026-01-03 04:57:49 | INFO     | ======================================================================
+2026-01-03 04:57:49 | INFO     | Model: resnet50 | Optimizer: adamw
+2026-01-03 04:57:49 | INFO     | Global batch: 1024 | Per-GPU: 128 | Epochs: 90
+2026-01-03 04:57:49 | INFO     | LR: 0.001 | WD: 0.05
+2026-01-03 04:57:49 | INFO     | ======================================================================
+2026-01-03 04:57:52 | INFO     | Train: 1281167 samples, 1251 steps/epoch
+2026-01-03 04:57:52 | INFO     | Val: 50000 samples
+2026-01-03 04:57:55 | INFO     | Parameters: 25.6M
+2026-01-03 05:02:20 | INFO     | E  1/90: loss=6.0627, train=3.3%, val=8.41%*, 6324 img/s
+2026-01-03 05:06:29 | INFO     | E  2/90: loss=4.5062, train=15.3%, val=18.47%*, 6928 img/s
+2026-01-03 05:10:36 | INFO     | E  3/90: loss=3.7086, train=25.4%, val=30.55%*, 6969 img/s
+2026-01-03 05:14:43 | INFO     | E  4/90: loss=3.2149, train=32.8%, val=31.57%*, 6971 img/s
+2026-01-03 05:18:50 | INFO     | E  5/90: loss=2.8661, train=38.5%, val=40.59%*, 6949 img/s
+2026-01-03 05:23:03 | INFO     | E  6/90: loss=2.5705, train=44.0%, val=47.83%*, 6761 img/s
+2026-01-03 05:27:13 | INFO     | E  7/90: loss=2.3259, train=48.3%, val=53.39%*, 6902 img/s
+2026-01-03 05:31:22 | INFO     | E  8/90: loss=2.1451, train=51.7%, val=55.12%*, 6911 img/s
+2026-01-03 05:35:31 | INFO     | E  9/90: loss=2.0321, train=54.0%, val=56.18%*, 6934 img/s
+2026-01-03 05:39:43 | INFO     | E 10/90: loss=1.9420, train=56.0%, val=58.21%*, 6916 img/s
+2026-01-03 05:43:56 | INFO     | E 11/90: loss=1.8500, train=57.5%, val=59.38%*, 6789 img/s
+2026-01-03 05:48:07 | INFO     | E 12/90: loss=1.7894, train=58.6%, val=61.08%*, 6818 img/s
+2026-01-03 05:52:20 | INFO     | E 13/90: loss=1.7543, train=59.6%, val=61.30%*, 6763 img/s
+2026-01-03 05:56:30 | INFO     | E 14/90: loss=1.7015, train=60.6%, val=61.43%*, 6868 img/s
+2026-01-03 06:00:38 | INFO     | E 15/90: loss=1.6608, train=61.5%, val=62.72%*, 6935 img/s
+2026-01-03 06:04:49 | INFO     | E 16/90: loss=1.6267, train=62.0%, val=63.39%*, 6844 img/s
+2026-01-03 06:09:00 | INFO     | E 17/90: loss=1.6018, train=62.4%, val=63.88%*, 6952 img/s
+2026-01-03 06:13:16 | INFO     | E 18/90: loss=1.5748, train=62.8%, val=64.45%*, 6665 img/s
+2026-01-03 06:17:28 | INFO     | E 19/90: loss=1.5390, train=63.8%, val=64.42%, 6794 img/s
+2026-01-03 06:21:44 | INFO     | E 20/90: loss=1.5331, train=63.9%, val=63.67%, 6715 img/s
+2026-01-03 06:25:54 | INFO     | E 21/90: loss=1.5006, train=64.4%, val=62.89%, 6867 img/s
+2026-01-03 06:30:03 | INFO     | E 22/90: loss=1.4816, train=64.9%, val=64.93%*, 6888 img/s
+2026-01-03 06:34:14 | INFO     | E 23/90: loss=1.4694, train=65.1%, val=64.85%, 6872 img/s
+2026-01-03 06:38:22 | INFO     | E 24/90: loss=1.4497, train=65.6%, val=66.37%*, 6930 img/s
+2026-01-03 06:42:37 | INFO     | E 25/90: loss=1.4336, train=66.0%, val=66.48%*, 6681 img/s
+2026-01-03 06:46:47 | INFO     | E 26/90: loss=1.4083, train=66.5%, val=66.57%*, 6886 img/s
+2026-01-03 06:50:58 | INFO     | E 27/90: loss=1.3946, train=66.7%, val=66.15%, 6815 img/s
+2026-01-03 06:55:10 | INFO     | E 28/90: loss=1.3816, train=67.0%, val=66.27%, 6810 img/s
+2026-01-03 06:59:21 | INFO     | E 29/90: loss=1.3625, train=67.3%, val=64.97%, 6877 img/s
+2026-01-03 07:03:30 | INFO     | E 30/90: loss=1.3575, train=67.6%, val=66.31%, 6888 img/s
+2026-01-03 07:07:40 | INFO     | E 31/90: loss=1.3338, train=68.0%, val=67.67%*, 6888 img/s
+2026-01-03 07:11:55 | INFO     | E 32/90: loss=1.3268, train=68.2%, val=67.69%*, 6681 img/s
+2026-01-03 07:16:06 | INFO     | E 33/90: loss=1.3080, train=68.5%, val=66.81%, 6888 img/s
+2026-01-03 07:20:17 | INFO     | E 34/90: loss=1.2969, train=68.8%, val=66.64%, 6851 img/s
+2026-01-03 07:24:30 | INFO     | E 35/90: loss=1.2847, train=69.0%, val=68.39%*, 6812 img/s
+2026-01-03 07:28:42 | INFO     | E 36/90: loss=1.2698, train=69.3%, val=67.50%, 6814 img/s
+2026-01-03 07:32:54 | INFO     | E 37/90: loss=1.2543, train=69.8%, val=66.78%, 6853 img/s
+2026-01-03 07:37:01 | INFO     | E 38/90: loss=1.2496, train=69.7%, val=68.69%*, 6980 img/s
+2026-01-03 07:41:15 | INFO     | E 39/90: loss=1.2241, train=70.2%, val=68.66%, 6729 img/s
+2026-01-03 07:45:25 | INFO     | E 40/90: loss=1.2143, train=70.4%, val=68.71%*, 6872 img/s
+2026-01-03 07:49:38 | INFO     | E 41/90: loss=1.2116, train=70.5%, val=68.80%*, 6814 img/s
+2026-01-03 07:53:52 | INFO     | E 42/90: loss=1.1956, train=70.9%, val=69.02%*, 6765 img/s
+2026-01-03 07:58:06 | INFO     | E 43/90: loss=1.1814, train=71.2%, val=69.33%*, 6751 img/s
+2026-01-03 08:02:16 | INFO     | E 44/90: loss=1.1770, train=71.4%, val=69.84%*, 6873 img/s
+2026-01-03 08:06:26 | INFO     | E 45/90: loss=1.1570, train=71.8%, val=68.93%, 6884 img/s
+2026-01-03 08:10:41 | INFO     | E 46/90: loss=1.1400, train=72.1%, val=69.82%, 6706 img/s
+2026-01-03 08:14:52 | INFO     | E 47/90: loss=1.1347, train=72.4%, val=70.26%*, 6857 img/s
+2026-01-03 08:19:04 | INFO     | E 48/90: loss=1.1088, train=72.9%, val=70.33%*, 6837 img/s
+2026-01-03 08:23:17 | INFO     | E 49/90: loss=1.0993, train=72.9%, val=70.24%, 6791 img/s
+2026-01-03 08:27:27 | INFO     | E 50/90: loss=1.0893, train=73.3%, val=70.08%, 6883 img/s
+2026-01-03 08:31:36 | INFO     | E 51/90: loss=1.0648, train=73.8%, val=70.50%*, 6911 img/s
+2026-01-03 08:35:45 | INFO     | E 52/90: loss=1.0557, train=74.1%, val=70.31%, 6920 img/s
+2026-01-03 08:39:59 | INFO     | E 53/90: loss=1.0430, train=74.3%, val=70.14%, 6756 img/s
+2026-01-03 08:44:08 | INFO     | E 54/90: loss=1.0225, train=74.9%, val=71.43%*, 6925 img/s
+2026-01-03 08:48:21 | INFO     | E 55/90: loss=1.0132, train=75.0%, val=70.93%, 6847 img/s
+2026-01-03 08:52:34 | INFO     | E 56/90: loss=0.9882, train=75.5%, val=70.81%, 6781 img/s
+2026-01-03 08:56:44 | INFO     | E 57/90: loss=0.9790, train=75.8%, val=71.81%*, 6866 img/s
+2026-01-03 09:00:54 | INFO     | E 58/90: loss=0.9593, train=76.3%, val=71.62%, 6890 img/s
+2026-01-03 09:05:03 | INFO     | E 59/90: loss=0.9553, train=76.4%, val=71.87%*, 6921 img/s
+2026-01-03 09:09:18 | INFO     | E 60/90: loss=0.9237, train=77.0%, val=72.12%*, 6756 img/s
+2026-01-03 09:13:28 | INFO     | E 61/90: loss=0.9150, train=77.2%, val=71.58%, 6890 img/s
+2026-01-03 09:17:40 | INFO     | E 62/90: loss=0.9098, train=77.4%, val=72.50%*, 6844 img/s
+2026-01-03 09:21:53 | INFO     | E 63/90: loss=0.8948, train=77.8%, val=72.49%, 6774 img/s
+2026-01-03 09:26:03 | INFO     | E 64/90: loss=0.8761, train=78.3%, val=72.39%, 6864 img/s
+2026-01-03 09:30:15 | INFO     | E 65/90: loss=0.8579, train=78.8%, val=72.47%, 6854 img/s
+2026-01-03 09:34:25 | INFO     | E 66/90: loss=0.8352, train=79.2%, val=72.60%*, 6876 img/s
+2026-01-03 09:38:40 | INFO     | E 67/90: loss=0.8261, train=79.5%, val=72.84%*, 6698 img/s
+2026-01-03 09:42:52 | INFO     | E 68/90: loss=0.8133, train=79.7%, val=73.05%*, 6827 img/s
+2026-01-03 09:47:04 | INFO     | E 69/90: loss=0.7951, train=80.3%, val=72.47%, 6814 img/s
+2026-01-03 09:51:17 | INFO     | E 70/90: loss=0.7827, train=80.5%, val=73.17%*, 6748 img/s
+2026-01-03 09:55:28 | INFO     | E 71/90: loss=0.7676, train=81.0%, val=73.32%*, 6868 img/s
+2026-01-03 09:59:39 | INFO     | E 72/90: loss=0.7583, train=81.2%, val=73.41%*, 6840 img/s
+2026-01-03 10:03:48 | INFO     | E 73/90: loss=0.7475, train=81.5%, val=73.54%*, 6904 img/s
+2026-01-03 10:08:02 | INFO     | E 74/90: loss=0.7321, train=81.9%, val=73.44%, 6750 img/s
+2026-01-03 10:12:13 | INFO     | E 75/90: loss=0.7172, train=82.3%, val=73.74%*, 6862 img/s
+2026-01-03 10:16:25 | INFO     | E 76/90: loss=0.7055, train=82.5%, val=73.60%, 6813 img/s
+2026-01-03 10:20:39 | INFO     | E 77/90: loss=0.7011, train=82.6%, val=73.58%, 6725 img/s
+2026-01-03 10:24:51 | INFO     | E 78/90: loss=0.6869, train=83.0%, val=73.83%*, 6841 img/s
+2026-01-03 10:29:03 | INFO     | E 79/90: loss=0.6822, train=83.2%, val=73.87%*, 6847 img/s
+2026-01-03 10:33:13 | INFO     | E 80/90: loss=0.6691, train=83.5%, val=73.95%*, 6906 img/s
+2026-01-03 10:37:27 | INFO     | E 81/90: loss=0.6618, train=83.7%, val=73.91%, 6866 img/s
+2026-01-03 10:41:41 | INFO     | E 82/90: loss=0.6521, train=83.9%, val=73.96%*, 6727 img/s
+2026-01-03 10:45:54 | INFO     | E 83/90: loss=0.6566, train=83.9%, val=74.06%*, 6831 img/s
+2026-01-03 10:50:09 | INFO     | E 84/90: loss=0.6518, train=84.0%, val=74.13%*, 6671 img/s
+2026-01-03 10:54:21 | INFO     | E 85/90: loss=0.6450, train=84.2%, val=74.17%*, 6855 img/s
+2026-01-03 10:58:31 | INFO     | E 86/90: loss=0.6379, train=84.4%, val=74.12%, 6893 img/s
+2026-01-03 11:02:40 | INFO     | E 87/90: loss=0.6423, train=84.2%, val=74.19%*, 6909 img/s
+2026-01-03 11:06:50 | INFO     | E 88/90: loss=0.6349, train=84.4%, val=74.21%*, 6885 img/s
+2026-01-03 11:11:05 | INFO     | E 89/90: loss=0.6358, train=84.4%, val=74.16%, 6704 img/s
+2026-01-03 11:15:15 | INFO     | E 90/90: loss=0.6369, train=84.4%, val=74.31%*, 6865 img/s
+2026-01-03 11:15:16 | INFO     | ======================================================================
+2026-01-03 11:15:16 | INFO     | Model: resnet50 | Optimizer: lion
+2026-01-03 11:15:16 | INFO     | Global batch: 1024 | Per-GPU: 128 | Epochs: 90
+2026-01-03 11:15:16 | INFO     | LR: 0.0001 | WD: 0.5
+2026-01-03 11:15:16 | INFO     | ======================================================================
+2026-01-03 11:15:19 | INFO     | Train: 1281167 samples, 1251 steps/epoch
+2026-01-03 11:15:19 | INFO     | Val: 50000 samples
+2026-01-03 11:15:19 | INFO     | Parameters: 25.6M
+2026-01-03 11:19:34 | INFO     | E  1/90: loss=6.4248, train=1.7%, val=6.58%*, 6653 img/s, belief=0.000, align=0.000
+2026-01-03 11:23:49 | INFO     | E  2/90: loss=4.7776, train=12.4%, val=22.23%*, 6645 img/s, belief=0.000, align=0.000
+2026-01-03 11:28:05 | INFO     | E  3/90: loss=3.7096, train=25.8%, val=34.43%*, 6667 img/s, belief=0.000, align=0.000
+2026-01-03 11:32:19 | INFO     | E  4/90: loss=3.1050, train=34.9%, val=42.11%*, 6688 img/s, belief=0.000, align=0.000
+2026-01-03 11:36:37 | INFO     | E  5/90: loss=2.7562, train=40.7%, val=45.93%*, 6600 img/s, belief=0.000, align=0.000
+2026-01-03 11:40:53 | INFO     | E  6/90: loss=2.5128, train=45.1%, val=51.63%*, 6686 img/s, belief=0.000, align=0.000
+2026-01-03 11:45:07 | INFO     | E  7/90: loss=2.3072, train=48.8%, val=53.76%*, 6720 img/s, belief=0.000, align=0.000
+2026-01-03 11:49:21 | INFO     | E  8/90: loss=2.1565, train=51.7%, val=56.42%*, 6681 img/s, belief=0.000, align=0.000
+2026-01-03 11:53:40 | INFO     | E  9/90: loss=2.0470, train=53.7%, val=59.44%*, 6677 img/s, belief=0.000, align=0.000
+2026-01-03 11:57:59 | INFO     | E 10/90: loss=1.9609, train=55.4%, val=60.12%*, 6540 img/s, belief=0.000, align=0.000
+2026-01-03 12:02:13 | INFO     | E 11/90: loss=1.8752, train=57.0%, val=61.21%*, 6695 img/s, belief=0.000, align=0.000
+2026-01-03 12:06:31 | INFO     | E 12/90: loss=1.8052, train=58.4%, val=61.23%*, 6566 img/s, belief=0.000, align=0.000
+2026-01-03 12:10:46 | INFO     | E 13/90: loss=1.7689, train=59.0%, val=63.37%*, 6680 img/s, belief=0.000, align=0.000
+2026-01-03 12:15:02 | INFO     | E 14/90: loss=1.7109, train=60.4%, val=63.59%*, 6646 img/s, belief=0.000, align=0.000
+2026-01-03 12:19:16 | INFO     | E 15/90: loss=1.6717, train=61.0%, val=64.50%*, 6704 img/s, belief=0.000, align=0.000
+2026-01-03 12:23:30 | INFO     | E 16/90: loss=1.6459, train=61.7%, val=64.71%*, 6710 img/s, belief=0.000, align=0.000
+2026-01-03 12:27:48 | INFO     | E 17/90: loss=1.6095, train=62.4%, val=65.42%*, 6563 img/s, belief=0.000, align=0.000
+2026-01-03 12:32:03 | INFO     | E 18/90: loss=1.5756, train=62.9%, val=65.83%*, 6708 img/s, belief=0.000, align=0.000
+2026-01-03 12:36:19 | INFO     | E 19/90: loss=1.5441, train=63.6%, val=65.69%, 6651 img/s, belief=0.000, align=0.000
+2026-01-03 12:40:33 | INFO     | E 20/90: loss=1.5377, train=63.6%, val=65.75%, 6696 img/s, belief=0.000, align=0.000
+2026-01-03 12:44:47 | INFO     | E 21/90: loss=1.4986, train=64.5%, val=66.21%*, 6742 img/s, belief=0.000, align=0.000
+2026-01-03 12:48:59 | INFO     | E 22/90: loss=1.4845, train=64.7%, val=66.61%*, 6756 img/s, belief=0.000, align=0.000
+2026-01-03 12:53:12 | INFO     | E 23/90: loss=1.4688, train=65.2%, val=66.78%*, 6733 img/s, belief=0.000, align=0.000
+2026-01-03 12:57:30 | INFO     | E 24/90: loss=1.4523, train=65.5%, val=67.23%*, 6598 img/s, belief=0.000, align=0.000
+2026-01-03 13:01:43 | INFO     | E 25/90: loss=1.4360, train=65.8%, val=67.28%*, 6752 img/s, belief=0.000, align=0.000
+2026-01-03 13:05:58 | INFO     | E 26/90: loss=1.4082, train=66.2%, val=67.22%, 6674 img/s, belief=0.000, align=0.000
+2026-01-03 13:10:13 | INFO     | E 27/90: loss=1.3933, train=66.7%, val=67.67%*, 6694 img/s, belief=0.000, align=0.000
+2026-01-03 13:14:27 | INFO     | E 28/90: loss=1.3800, train=66.9%, val=67.86%*, 6758 img/s, belief=0.000, align=0.000
+2026-01-03 13:18:40 | INFO     | E 29/90: loss=1.3704, train=67.2%, val=68.20%*, 6749 img/s, belief=0.000, align=0.000
+2026-01-03 13:22:53 | INFO     | E 30/90: loss=1.3553, train=67.4%, val=68.43%*, 6753 img/s, belief=0.000, align=0.000
+2026-01-03 13:27:09 | INFO     | E 31/90: loss=1.3341, train=67.8%, val=68.46%*, 6654 img/s, belief=0.000, align=0.000
+2026-01-03 13:31:22 | INFO     | E 32/90: loss=1.3295, train=68.0%, val=68.90%*, 6722 img/s, belief=0.000, align=0.000
+2026-01-03 13:35:37 | INFO     | E 33/90: loss=1.3163, train=68.1%, val=68.82%, 6696 img/s, belief=0.000, align=0.000
+2026-01-03 13:39:52 | INFO     | E 34/90: loss=1.2974, train=68.5%, val=68.81%, 6685 img/s, belief=0.000, align=0.000
+2026-01-03 13:44:06 | INFO     | E 35/90: loss=1.2885, train=68.6%, val=68.91%*, 6722 img/s, belief=0.000, align=0.000
+2026-01-03 13:48:19 | INFO     | E 36/90: loss=1.2759, train=69.0%, val=69.12%*, 6731 img/s, belief=0.000, align=0.000
+2026-01-03 13:52:33 | INFO     | E 37/90: loss=1.2530, train=69.5%, val=69.31%*, 6735 img/s, belief=0.000, align=0.000
+2026-01-03 13:56:50 | INFO     | E 38/90: loss=1.2484, train=69.4%, val=69.33%*, 6610 img/s, belief=0.000, align=0.000
+2026-01-03 14:01:03 | INFO     | E 39/90: loss=1.2365, train=69.8%, val=69.69%*, 6758 img/s, belief=0.000, align=0.000
+2026-01-03 14:05:17 | INFO     | E 40/90: loss=1.2227, train=70.1%, val=69.94%*, 6724 img/s, belief=0.000, align=0.000
+2026-01-03 14:09:31 | INFO     | E 41/90: loss=1.2193, train=70.2%, val=70.11%*, 6723 img/s, belief=0.000, align=0.000
+2026-01-03 14:13:45 | INFO     | E 42/90: loss=1.1944, train=70.6%, val=70.21%*, 6712 img/s, belief=0.000, align=0.000
+2026-01-03 14:17:59 | INFO     | E 43/90: loss=1.1842, train=70.9%, val=69.96%, 6738 img/s, belief=0.000, align=0.000
+2026-01-03 14:22:11 | INFO     | E 44/90: loss=1.1789, train=71.0%, val=70.36%*, 6762 img/s, belief=0.000, align=0.000
+2026-01-03 14:26:29 | INFO     | E 45/90: loss=1.1596, train=71.4%, val=70.46%*, 6595 img/s, belief=0.000, align=0.000
+2026-01-03 14:30:41 | INFO     | E 46/90: loss=1.1437, train=71.7%, val=70.16%, 6760 img/s, belief=0.000, align=0.000
+2026-01-03 14:34:56 | INFO     | E 47/90: loss=1.1361, train=71.9%, val=70.64%*, 6700 img/s, belief=0.000, align=0.000
+2026-01-03 14:39:12 | INFO     | E 48/90: loss=1.1142, train=72.4%, val=70.92%*, 6649 img/s, belief=0.000, align=0.000
+2026-01-03 14:43:26 | INFO     | E 49/90: loss=1.1051, train=72.6%, val=70.53%, 6738 img/s, belief=0.000, align=0.000
+2026-01-03 14:47:39 | INFO     | E 50/90: loss=1.0901, train=73.0%, val=70.96%*, 6754 img/s, belief=0.000, align=0.000
+2026-01-03 14:51:53 | INFO     | E 51/90: loss=1.0733, train=73.2%, val=70.97%*, 6714 img/s, belief=0.000, align=0.000
+2026-01-03 14:56:08 | INFO     | E 52/90: loss=1.0638, train=73.5%, val=71.07%*, 6646 img/s, belief=0.000, align=0.000
+2026-01-03 15:00:22 | INFO     | E 53/90: loss=1.0564, train=73.7%, val=71.16%*, 6699 img/s, belief=0.000, align=0.000
+2026-01-03 15:04:37 | INFO     | E 54/90: loss=1.0411, train=74.1%, val=71.46%*, 6696 img/s, belief=0.000, align=0.000
+2026-01-03 15:08:51 | INFO     | E 55/90: loss=1.0237, train=74.5%, val=71.43%, 6694 img/s, belief=0.000, align=0.000
+2026-01-03 15:13:05 | INFO     | E 56/90: loss=0.9990, train=74.9%, val=71.42%, 6704 img/s, belief=0.000, align=0.000
+2026-01-03 15:17:18 | INFO     | E 57/90: loss=0.9979, train=75.0%, val=71.49%*, 6775 img/s, belief=0.000, align=0.000
+2026-01-03 15:21:32 | INFO     | E 58/90: loss=0.9780, train=75.4%, val=71.75%*, 6697 img/s, belief=0.000, align=0.000
+2026-01-03 15:25:49 | INFO     | E 59/90: loss=0.9680, train=75.7%, val=71.72%, 6628 img/s, belief=0.000, align=0.000
+2026-01-03 15:30:02 | INFO     | E 60/90: loss=0.9481, train=76.2%, val=71.90%*, 6728 img/s, belief=0.000, align=0.000
+2026-01-03 15:34:16 | INFO     | E 61/90: loss=0.9368, train=76.4%, val=71.82%, 6725 img/s, belief=0.000, align=0.000
+2026-01-03 15:38:31 | INFO     | E 62/90: loss=0.9210, train=76.8%, val=72.25%*, 6655 img/s, belief=0.000, align=0.000
+2026-01-03 15:42:46 | INFO     | E 63/90: loss=0.9137, train=77.0%, val=72.26%*, 6691 img/s, belief=0.000, align=0.000
+2026-01-03 15:47:00 | INFO     | E 64/90: loss=0.8891, train=77.5%, val=72.33%*, 6719 img/s, belief=0.000, align=0.000
+2026-01-03 15:51:14 | INFO     | E 65/90: loss=0.8824, train=77.7%, val=72.26%, 6712 img/s, belief=0.000, align=0.000
+2026-01-03 15:55:31 | INFO     | E 66/90: loss=0.8613, train=78.2%, val=72.63%*, 6619 img/s, belief=0.000, align=0.000
+2026-01-03 15:59:45 | INFO     | E 67/90: loss=0.8476, train=78.6%, val=72.48%, 6713 img/s, belief=0.000, align=0.000
+2026-01-03 16:04:03 | INFO     | E 68/90: loss=0.8369, train=78.9%, val=72.58%, 6587 img/s, belief=0.000, align=0.000
+2026-01-03 16:08:18 | INFO     | E 69/90: loss=0.8209, train=79.3%, val=72.76%*, 6669 img/s, belief=0.000, align=0.000
+2026-01-03 16:12:32 | INFO     | E 70/90: loss=0.8057, train=79.6%, val=72.93%*, 6726 img/s, belief=0.000, align=0.000
+2026-01-03 16:16:45 | INFO     | E 71/90: loss=0.7899, train=80.0%, val=73.05%*, 6735 img/s, belief=0.000, align=0.000
+2026-01-03 16:20:58 | INFO     | E 72/90: loss=0.7836, train=80.1%, val=72.94%, 6750 img/s, belief=0.000, align=0.000
+2026-01-03 16:25:15 | INFO     | E 73/90: loss=0.7628, train=80.7%, val=72.88%, 6628 img/s, belief=0.000, align=0.000
+2026-01-03 16:29:26 | INFO     | E 74/90: loss=0.7574, train=80.9%, val=73.06%*, 6790 img/s, belief=0.000, align=0.000
+2026-01-03 16:33:41 | INFO     | E 75/90: loss=0.7430, train=81.2%, val=73.02%, 6677 img/s, belief=0.000, align=0.000
+2026-01-03 16:37:58 | INFO     | E 76/90: loss=0.7345, train=81.5%, val=73.02%, 6629 img/s, belief=0.000, align=0.000
+2026-01-03 16:42:12 | INFO     | E 77/90: loss=0.7248, train=81.7%, val=73.02%, 6735 img/s, belief=0.000, align=0.000
+2026-01-03 16:46:25 | INFO     | E 78/90: loss=0.7131, train=82.0%, val=73.16%*, 6744 img/s, belief=0.000, align=0.000
+2026-01-03 16:50:39 | INFO     | E 79/90: loss=0.7033, train=82.1%, val=73.27%*, 6724 img/s, belief=0.000, align=0.000
+2026-01-03 16:54:57 | INFO     | E 80/90: loss=0.6983, train=82.3%, val=73.37%*, 6595 img/s, belief=0.000, align=0.000
+2026-01-03 16:59:10 | INFO     | E 81/90: loss=0.6895, train=82.5%, val=73.32%, 6753 img/s, belief=0.000, align=0.000
+2026-01-03 17:03:23 | INFO     | E 82/90: loss=0.6811, train=82.8%, val=73.36%, 6746 img/s, belief=0.000, align=0.000
+2026-01-03 17:07:37 | INFO     | E 83/90: loss=0.6835, train=82.8%, val=73.44%*, 6726 img/s, belief=0.000, align=0.000
+2026-01-03 17:11:50 | INFO     | E 84/90: loss=0.6706, train=83.1%, val=73.54%*, 6773 img/s, belief=0.000, align=0.000
+2026-01-03 17:16:02 | INFO     | E 85/90: loss=0.6685, train=83.2%, val=73.60%*, 6773 img/s, belief=0.000, align=0.000
+2026-01-03 17:20:16 | INFO     | E 86/90: loss=0.6704, train=83.2%, val=73.50%, 6745 img/s, belief=0.000, align=0.000
+2026-01-03 17:24:31 | INFO     | E 87/90: loss=0.6641, train=83.4%, val=73.57%, 6662 img/s, belief=0.000, align=0.000
+2026-01-03 17:28:46 | INFO     | E 88/90: loss=0.6624, train=83.3%, val=73.50%, 6699 img/s, belief=0.000, align=0.000
+2026-01-03 17:33:00 | INFO     | E 89/90: loss=0.6618, train=83.3%, val=73.60%, 6699 img/s, belief=0.000, align=0.000
+2026-01-03 17:37:18 | INFO     | E 90/90: loss=0.6562, train=83.4%, val=73.56%, 6584 img/s, belief=0.000, align=0.000
+2026-01-03 17:37:19 | INFO     | ======================================================================
+2026-01-03 17:37:19 | INFO     | Model: resnet50 | Optimizer: rlo
+2026-01-03 17:37:19 | INFO     | Global batch: 1024 | Per-GPU: 128 | Epochs: 90
+2026-01-03 17:37:19 | INFO     | LR: 0.0001 | WD: 0.5
+2026-01-03 17:37:19 | INFO     | ======================================================================
+2026-01-03 17:37:22 | INFO     | Train: 1281167 samples, 1251 steps/epoch
+2026-01-03 17:37:22 | INFO     | Val: 50000 samples
+2026-01-03 17:37:22 | INFO     | Parameters: 25.6M
+2026-01-03 17:41:43 | INFO     | E  1/90: loss=6.4158, train=1.8%, val=6.80%*, 6467 img/s, belief=1.269, align=0.154
+2026-01-03 17:46:03 | INFO     | E  2/90: loss=4.7884, train=12.5%, val=21.83%*, 6484 img/s, belief=1.269, align=0.140
+2026-01-03 17:50:24 | INFO     | E  3/90: loss=3.7275, train=25.6%, val=34.06%*, 6465 img/s, belief=1.269, align=0.147
+2026-01-03 17:54:47 | INFO     | E  4/90: loss=3.1151, train=34.8%, val=41.52%*, 6476 img/s, belief=1.269, align=0.149
+2026-01-03 17:59:09 | INFO     | E  5/90: loss=2.7711, train=40.6%, val=46.77%*, 6433 img/s, belief=1.269, align=0.150
+2026-01-03 18:03:30 | INFO     | E  6/90: loss=2.5093, train=45.1%, val=51.18%*, 6457 img/s, belief=1.269, align=0.149
+2026-01-03 18:07:53 | INFO     | E  7/90: loss=2.3111, train=48.9%, val=53.99%*, 6405 img/s, belief=1.269, align=0.148
+2026-01-03 18:12:15 | INFO     | E  8/90: loss=2.1653, train=51.4%, val=56.20%*, 6474 img/s, belief=1.269, align=0.147
+2026-01-03 18:16:35 | INFO     | E  9/90: loss=2.0444, train=53.8%, val=58.33%*, 6498 img/s, belief=1.269, align=0.147
+2026-01-03 18:20:56 | INFO     | E 10/90: loss=1.9633, train=55.5%, val=59.68%*, 6474 img/s, belief=1.269, align=0.146
+2026-01-03 18:25:20 | INFO     | E 11/90: loss=1.8779, train=56.9%, val=61.06%*, 6463 img/s, belief=1.269, align=0.146
+2026-01-03 18:29:43 | INFO     | E 12/90: loss=1.8121, train=58.3%, val=61.82%*, 6428 img/s, belief=1.269, align=0.146
+2026-01-03 18:34:03 | INFO     | E 13/90: loss=1.7686, train=59.1%, val=62.46%*, 6477 img/s, belief=1.269, align=0.145
+2026-01-03 18:38:26 | INFO     | E 14/90: loss=1.7200, train=60.2%, val=63.33%*, 6420 img/s, belief=1.269, align=0.145
+2026-01-03 18:42:48 | INFO     | E 15/90: loss=1.6722, train=61.1%, val=63.76%*, 6448 img/s, belief=1.269, align=0.145
+2026-01-03 18:47:08 | INFO     | E 16/90: loss=1.6429, train=61.7%, val=64.57%*, 6478 img/s, belief=1.269, align=0.145
+2026-01-03 18:51:30 | INFO     | E 17/90: loss=1.6134, train=62.3%, val=65.35%*, 6454 img/s, belief=1.269, align=0.145
+2026-01-03 18:55:53 | INFO     | E 18/90: loss=1.5824, train=62.8%, val=65.79%*, 6464 img/s, belief=1.269, align=0.145
+2026-01-03 19:00:16 | INFO     | E 19/90: loss=1.5517, train=63.3%, val=65.68%, 6420 img/s, belief=1.269, align=0.145
+2026-01-03 19:04:37 | INFO     | E 20/90: loss=1.5383, train=63.6%, val=66.39%*, 6461 img/s, belief=1.269, align=0.145
+2026-01-03 19:08:59 | INFO     | E 21/90: loss=1.5082, train=64.3%, val=66.48%*, 6453 img/s, belief=1.269, align=0.145
+2026-01-03 19:13:20 | INFO     | E 22/90: loss=1.4871, train=64.8%, val=66.79%*, 6469 img/s, belief=1.269, align=0.145
+2026-01-03 19:17:41 | INFO     | E 23/90: loss=1.4752, train=65.0%, val=66.94%*, 6463 img/s, belief=1.269, align=0.144
+2026-01-03 19:22:02 | INFO     | E 24/90: loss=1.4497, train=65.4%, val=67.40%*, 6462 img/s, belief=1.269, align=0.144
+2026-01-03 19:26:23 | INFO     | E 25/90: loss=1.4326, train=65.9%, val=67.29%, 6476 img/s, belief=1.269, align=0.144
+2026-01-03 19:30:46 | INFO     | E 26/90: loss=1.4192, train=66.1%, val=67.55%*, 6392 img/s, belief=1.269, align=0.144
+2026-01-03 19:35:07 | INFO     | E 27/90: loss=1.3950, train=66.5%, val=67.91%*, 6473 img/s, belief=1.269, align=0.144
+2026-01-03 19:39:29 | INFO     | E 28/90: loss=1.3871, train=66.7%, val=68.10%*, 6434 img/s, belief=1.269, align=0.144
+2026-01-03 19:43:49 | INFO     | E 29/90: loss=1.3674, train=67.1%, val=67.50%, 6477 img/s, belief=1.269, align=0.144
+2026-01-03 19:48:11 | INFO     | E 30/90: loss=1.3601, train=67.4%, val=68.24%*, 6462 img/s, belief=1.269, align=0.144
+2026-01-03 19:52:32 | INFO     | E 31/90: loss=1.3410, train=67.7%, val=68.38%*, 6483 img/s, belief=1.269, align=0.144
+2026-01-03 19:56:53 | INFO     | E 32/90: loss=1.3290, train=67.9%, val=68.67%*, 6482 img/s, belief=1.269, align=0.143
+2026-01-03 20:01:16 | INFO     | E 33/90: loss=1.3196, train=68.2%, val=68.16%, 6392 img/s, belief=1.269, align=0.144
+2026-01-03 20:05:37 | INFO     | E 34/90: loss=1.2992, train=68.4%, val=68.25%, 6458 img/s, belief=1.269, align=0.144
+2026-01-03 20:10:00 | INFO     | E 35/90: loss=1.2859, train=68.8%, val=69.47%*, 6415 img/s, belief=1.269, align=0.143
+2026-01-03 20:14:21 | INFO     | E 36/90: loss=1.2821, train=69.0%, val=69.27%, 6459 img/s, belief=1.269, align=0.144
+2026-01-03 20:18:43 | INFO     | E 37/90: loss=1.2592, train=69.3%, val=69.33%, 6454 img/s, belief=1.269, align=0.143
+2026-01-03 20:23:04 | INFO     | E 38/90: loss=1.2539, train=69.5%, val=69.53%*, 6472 img/s, belief=1.269, align=0.143
+2026-01-03 20:27:24 | INFO     | E 39/90: loss=1.2282, train=69.9%, val=69.46%, 6480 img/s, belief=1.269, align=0.143
+2026-01-03 20:31:47 | INFO     | E 40/90: loss=1.2250, train=70.0%, val=69.75%*, 6404 img/s, belief=1.269, align=0.143
+2026-01-03 20:36:08 | INFO     | E 41/90: loss=1.2201, train=70.1%, val=69.83%*, 6462 img/s, belief=1.269, align=0.143
+2026-01-03 20:40:30 | INFO     | E 42/90: loss=1.1947, train=70.7%, val=70.15%*, 6449 img/s, belief=1.269, align=0.143
+2026-01-03 20:44:52 | INFO     | E 43/90: loss=1.1858, train=70.8%, val=69.84%, 6456 img/s, belief=1.269, align=0.143
+2026-01-03 20:49:12 | INFO     | E 44/90: loss=1.1789, train=71.0%, val=69.91%, 6484 img/s, belief=1.269, align=0.143
+2026-01-03 20:53:33 | INFO     | E 45/90: loss=1.1580, train=71.6%, val=70.61%*, 6476 img/s, belief=1.269, align=0.143
+2026-01-03 20:57:54 | INFO     | E 46/90: loss=1.1503, train=71.6%, val=70.77%*, 6462 img/s, belief=1.269, align=0.143
+2026-01-03 21:02:17 | INFO     | E 47/90: loss=1.1414, train=71.8%, val=70.63%, 6403 img/s, belief=1.269, align=0.143
+2026-01-03 21:06:38 | INFO     | E 48/90: loss=1.1133, train=72.4%, val=70.18%, 6477 img/s, belief=1.269, align=0.143
+2026-01-03 21:11:00 | INFO     | E 49/90: loss=1.1007, train=72.6%, val=70.76%, 6438 img/s, belief=1.269, align=0.143
+2026-01-03 21:15:21 | INFO     | E 50/90: loss=1.0937, train=72.8%, val=70.92%*, 6466 img/s, belief=1.269, align=0.143
+2026-01-03 21:19:44 | INFO     | E 51/90: loss=1.0838, train=73.1%, val=70.97%*, 6437 img/s, belief=1.269, align=0.142
+2026-01-03 21:24:04 | INFO     | E 52/90: loss=1.0608, train=73.6%, val=71.09%*, 6463 img/s, belief=1.269, align=0.142
+2026-01-03 21:28:26 | INFO     | E 53/90: loss=1.0497, train=73.9%, val=70.96%, 6450 img/s, belief=1.269, align=0.143
+2026-01-03 21:32:49 | INFO     | E 54/90: loss=1.0344, train=74.1%, val=70.99%, 6388 img/s, belief=1.269, align=0.142
+2026-01-03 21:37:11 | INFO     | E 55/90: loss=1.0251, train=74.4%, val=71.36%*, 6457 img/s, belief=1.269, align=0.142
+2026-01-03 21:41:33 | INFO     | E 56/90: loss=1.0045, train=74.8%, val=71.65%*, 6458 img/s, belief=1.269, align=0.142
+2026-01-03 21:45:53 | INFO     | E 57/90: loss=0.9983, train=74.9%, val=71.66%*, 6502 img/s, belief=1.269, align=0.142
+2026-01-03 21:50:14 | INFO     | E 58/90: loss=0.9765, train=75.6%, val=71.54%, 6479 img/s, belief=1.269, align=0.142
+2026-01-03 21:54:35 | INFO     | E 59/90: loss=0.9647, train=75.7%, val=71.94%*, 6445 img/s, belief=1.269, align=0.142
+2026-01-03 21:59:02 | INFO     | E 60/90: loss=0.9458, train=76.2%, val=72.05%*, 6280 img/s, belief=1.269, align=0.142
+2026-01-03 22:03:24 | INFO     | E 61/90: loss=0.9370, train=76.3%, val=71.90%, 6442 img/s, belief=1.269, align=0.142
+2026-01-03 22:07:46 | INFO     | E 62/90: loss=0.9217, train=76.8%, val=71.85%, 6414 img/s, belief=1.269, align=0.141
+2026-01-03 22:12:11 | INFO     | E 63/90: loss=0.9106, train=77.0%, val=72.10%*, 6408 img/s, belief=1.269, align=0.142
+2026-01-03 22:16:33 | INFO     | E 64/90: loss=0.8979, train=77.3%, val=72.27%*, 6406 img/s, belief=1.269, align=0.141
+2026-01-03 22:20:55 | INFO     | E 65/90: loss=0.8815, train=77.8%, val=72.08%, 6427 img/s, belief=1.269, align=0.141
+2026-01-03 22:25:18 | INFO     | E 66/90: loss=0.8624, train=78.1%, val=72.42%*, 6424 img/s, belief=1.269, align=0.141
+2026-01-03 22:29:39 | INFO     | E 67/90: loss=0.8499, train=78.6%, val=72.60%*, 6454 img/s, belief=1.269, align=0.141
+2026-01-03 22:34:01 | INFO     | E 68/90: loss=0.8394, train=78.7%, val=72.44%, 6468 img/s, belief=1.269, align=0.141
+2026-01-03 22:38:22 | INFO     | E 69/90: loss=0.8203, train=79.2%, val=72.51%, 6471 img/s, belief=1.269, align=0.141
+2026-01-03 22:42:44 | INFO     | E 70/90: loss=0.8044, train=79.6%, val=72.60%, 6458 img/s, belief=1.269, align=0.141
+2026-01-03 22:47:05 | INFO     | E 71/90: loss=0.7971, train=79.9%, val=72.64%*, 6469 img/s, belief=1.269, align=0.140
+2026-01-03 22:51:25 | INFO     | E 72/90: loss=0.7786, train=80.3%, val=72.85%*, 6480 img/s, belief=1.269, align=0.141
+2026-01-03 22:55:47 | INFO     | E 73/90: loss=0.7679, train=80.5%, val=72.93%*, 6466 img/s, belief=1.269, align=0.140
+2026-01-03 23:00:08 | INFO     | E 74/90: loss=0.7569, train=80.7%, val=72.86%, 6475 img/s, belief=1.269, align=0.141
+2026-01-03 23:04:29 | INFO     | E 75/90: loss=0.7451, train=81.2%, val=73.27%*, 6475 img/s, belief=1.269, align=0.140
+2026-01-03 23:08:51 | INFO     | E 76/90: loss=0.7400, train=81.3%, val=72.98%, 6463 img/s, belief=1.269, align=0.140
+2026-01-03 23:13:12 | INFO     | E 77/90: loss=0.7311, train=81.5%, val=73.08%, 6488 img/s, belief=1.269, align=0.140
+2026-01-03 23:17:33 | INFO     | E 78/90: loss=0.7145, train=81.9%, val=73.04%, 6475 img/s, belief=1.269, align=0.140
+2026-01-03 23:21:55 | INFO     | E 79/90: loss=0.7069, train=82.2%, val=73.27%*, 6461 img/s, belief=1.269, align=0.140
+2026-01-03 23:26:15 | INFO     | E 80/90: loss=0.7014, train=82.2%, val=73.31%*, 6495 img/s, belief=1.269, align=0.140
+2026-01-03 23:30:37 | INFO     | E 81/90: loss=0.6870, train=82.6%, val=73.35%*, 6481 img/s, belief=1.269, align=0.140
+2026-01-03 23:34:59 | INFO     | E 82/90: loss=0.6816, train=82.8%, val=73.35%, 6463 img/s, belief=1.269, align=0.140
+2026-01-03 23:39:20 | INFO     | E 83/90: loss=0.6797, train=82.8%, val=73.50%*, 6466 img/s, belief=1.269, align=0.139
+2026-01-03 23:43:42 | INFO     | E 84/90: loss=0.6772, train=82.9%, val=73.48%, 6448 img/s, belief=1.269, align=0.140
+2026-01-03 23:48:04 | INFO     | E 85/90: loss=0.6708, train=83.1%, val=73.55%*, 6434 img/s, belief=1.269, align=0.140
+2026-01-03 23:52:25 | INFO     | E 86/90: loss=0.6687, train=83.2%, val=73.57%*, 6476 img/s, belief=1.269, align=0.139
+2026-01-03 23:56:46 | INFO     | E 87/90: loss=0.6664, train=83.3%, val=73.55%, 6469 img/s, belief=1.269, align=0.140
+2026-01-04 00:01:08 | INFO     | E 88/90: loss=0.6644, train=83.4%, val=73.45%, 6452 img/s, belief=1.269, align=0.140
+2026-01-04 00:05:29 | INFO     | E 89/90: loss=0.6655, train=83.2%, val=73.52%, 6492 img/s, belief=1.269, align=0.140
+2026-01-04 00:09:50 | INFO     | E 90/90: loss=0.6560, train=83.5%, val=73.52%, 6486 img/s, belief=1.269, align=0.140
+2026-01-04 00:09:51 | INFO     | ======================================================================
+2026-01-04 00:09:51 | INFO     | Model: resnet50 | Optimizer: rlo_lambda_a
+2026-01-04 00:09:51 | INFO     | Global batch: 1024 | Per-GPU: 128 | Epochs: 90
+2026-01-04 00:09:51 | INFO     | LR: 0.0001 | WD: 0.5
+2026-01-04 00:09:51 | INFO     | ======================================================================
+2026-01-04 00:09:54 | INFO     | Train: 1281167 samples, 1251 steps/epoch
+2026-01-04 00:09:54 | INFO     | Val: 50000 samples
+2026-01-04 00:09:55 | INFO     | Parameters: 25.6M
+2026-01-04 00:14:09 | INFO     | E  1/90: loss=6.3555, train=2.0%, val=7.56%*, 6676 img/s, belief=1.269, align=0.000
+2026-01-04 00:18:21 | INFO     | E  2/90: loss=4.6539, train=13.9%, val=23.03%*, 6745 img/s, belief=1.269, align=0.000
+2026-01-04 00:22:33 | INFO     | E  3/90: loss=3.6189, train=27.1%, val=35.11%*, 6732 img/s, belief=1.269, align=0.000
