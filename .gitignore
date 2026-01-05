@@ -5,3 +5,6 @@ data/
 *.png
 results/
 *.pt
+results_*/
+rlo_*
+.json

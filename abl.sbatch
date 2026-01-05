@@ -14,8 +14,8 @@
 
 # =============================================================================
 # Ablation Studies
-# Log: cat rlo_abl-<JOB_ID>.out
-# Training log: cat results_ablation/ablation_rank0.log
+# SLURM log: cat rlo_abl-<JOB_ID>.out
+# Training log: cat /blue/wdixon/wang.yixuan/rlo_results/ablation/ablation_rank0.log
 # =============================================================================
 
 hostname;date;pwd
@@ -33,10 +33,12 @@ if not os.path.exists(path):
     with open(path, 'w') as f: f.write(patch)
 PATCH
 
-mkdir -p results_ablation
+# Output to blue storage (not home dir)
+OUT_BASE="/blue/wdixon/wang.yixuan/rlo_results"
+mkdir -p $OUT_BASE/ablation
 
 DATA="/blue/wdixon/wang.yixuan/lypcdf/imagenet_folder"
-OUT="./results_ablation"
+OUT="$OUT_BASE/ablation"
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export OMP_NUM_THREADS=4

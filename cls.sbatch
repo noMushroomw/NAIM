@@ -14,8 +14,8 @@
 
 # =============================================================================
 # Section 4.1: Image Classification
-# Log: cat rlo_cls-<JOB_ID>.out
-# Training log: cat results_classification/*_rank0.log
+# SLURM log: cat rlo_cls-<JOB_ID>.out
+# Training log: cat /blue/wdixon/wang.yixuan/rlo_results/classification/*_rank0.log
 # =============================================================================
 
 hostname;date;pwd
@@ -34,10 +34,12 @@ if not os.path.exists(path):
     print(f"Created dill patch: {path}")
 PATCH
 
-mkdir -p results_classification
+# Output to blue storage (not home dir)
+OUT_BASE="/blue/wdixon/wang.yixuan/rlo_results"
+mkdir -p $OUT_BASE/classification
 
 DATA="/blue/wdixon/wang.yixuan/lypcdf/imagenet_folder"
-OUT="./results_classification"
+OUT="$OUT_BASE/classification"
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export OMP_NUM_THREADS=4
