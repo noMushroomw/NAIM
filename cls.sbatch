@@ -14,53 +14,37 @@
 
 # =============================================================================
 # Section 4.1: Image Classification
-# SLURM log: cat rlo_cls-<JOB_ID>.out
-# Training log: cat /blue/wdixon/wang.yixuan/rlo_results/classification/*_rank0.log
+# Log: cat rlo_cls-<JOB_ID>.out
 # =============================================================================
 
 hostname;date;pwd
-
 module load python conda cuda/12.8
 export XDG_RUNTIME_DIR="${SLURM_TMPDIR}"
 conda activate ly
 
-# Fix dill compatibility
+# Fix dill
 python << 'PATCH'
 import site, os
 patch = "try:\n    import dill\n    if not hasattr(dill, 'extend'):\n        dill.extend = lambda use_dill=True: None\nexcept ImportError:\n    pass\n"
 path = os.path.join(site.getsitepackages()[0], 'sitecustomize.py')
 if not os.path.exists(path):
     with open(path, 'w') as f: f.write(patch)
-    print(f"Created dill patch: {path}")
 PATCH
 
-# Output to blue storage (not home dir)
-OUT_BASE="/blue/wdixon/wang.yixuan/rlo_results"
-mkdir -p $OUT_BASE/classification
-
+OUT="/blue/wdixon/wang.yixuan/rlo_results/classification"
 DATA="/blue/wdixon/wang.yixuan/lypcdf/imagenet_folder"
-OUT="$OUT_BASE/classification"
+mkdir -p $OUT
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export OMP_NUM_THREADS=4
 
-echo "=============================================="
-echo "PyTorch: $(python -c 'import torch; print(torch.__version__)')"
-nvidia-smi --query-gpu=name,memory.total --format=csv
-echo "=============================================="
+echo ">>> ResNet-50"
+torchrun --nproc_per_node=8 --master_port=29500 train_classification.py --model resnet50 --optimizer all --data $DATA --output $OUT
 
-echo ">>> ResNet-50 (90 epochs)"
-torchrun --nproc_per_node=8 --master_port=29500 \
-    train_classification.py --model resnet50 --optimizer all --data $DATA --output $OUT
+echo ">>> ViT-S/16"
+torchrun --nproc_per_node=8 --master_port=29501 train_classification.py --model vit_s16 --optimizer all --data $DATA --output $OUT
 
-echo ">>> ViT-S/16 (300 epochs)"
-torchrun --nproc_per_node=8 --master_port=29501 \
-    train_classification.py --model vit_s16 --optimizer all --data $DATA --output $OUT
+echo ">>> ViT-B/16"
+torchrun --nproc_per_node=8 --master_port=29502 train_classification.py --model vit_b16 --optimizer all --data $DATA --output $OUT
 
-echo ">>> ViT-B/16 (300 epochs)"
-torchrun --nproc_per_node=8 --master_port=29502 \
-    train_classification.py --model vit_b16 --optimizer all --data $DATA --output $OUT
-
-echo "=============================================="
 echo "Done: $(date)"
-echo "=============================================="
