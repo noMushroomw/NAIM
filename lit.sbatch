@@ -7,15 +7,16 @@
 #SBATCH --cpus-per-task=36
 #SBATCH --mem=280gb
 #SBATCH --time=48:00:00
-#SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=williamsw2179@gmail.com
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --output=/blue/wdixon/wang.yixuan/rlo_experiments/logs/%x-%j.out
+#SBATCH --error=/blue/wdixon/wang.yixuan/rlo_experiments/logs/%x-%j.err
 
-hostname;date;pwd
+hostname; date; pwd
 module load python conda cuda/12.8
 export XDG_RUNTIME_DIR="${SLURM_TMPDIR}"
 conda activate ly
+
+BASE="/blue/wdixon/wang.yixuan/rlo_experiments"
+mkdir -p $BASE/{logs,lit}
 
 python << 'PATCH'
 import site, os
@@ -25,13 +26,13 @@ if not os.path.exists(path):
     with open(path, 'w') as f: f.write(patch)
 PATCH
 
-OUT="/blue/wdixon/wang.yixuan/rlo_results/lit"
-DATA="/blue/wdixon/wang.yixuan/lypcdf/imagenet_folder"
-mkdir -p $OUT
-
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export OMP_NUM_THREADS=4
+cd $SLURM_SUBMIT_DIR
 
-torchrun --nproc_per_node=8 --master_port=29510 train_lit.py --optimizer all --data $DATA --output $OUT --epochs 30
+torchrun --nproc_per_node=8 --master_port=29510 train_lit.py \
+    --optimizer all \
+    --data /blue/wdixon/wang.yixuan/lypcdf/imagenet_folder \
+    --output $BASE/lit --epochs 30
 
 echo "Done: $(date)"
