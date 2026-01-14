@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=36
 #SBATCH --mem=280gb
-#SBATCH --time=96:00:00
+#SBATCH --time=300:00:00
 #SBATCH --output=/blue/wdixon/wang.yixuan/rlo_experiments/logs/%x-%j.out
 #SBATCH --error=/blue/wdixon/wang.yixuan/rlo_experiments/logs/%x-%j.err
 
