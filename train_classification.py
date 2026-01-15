@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
 """
-Section 4.1: Image Classification - LION Paper Table 12 EXACT
-ResNet-50/CIFAR-100, ViT-S/16, ViT-B/16/ImageNet
+Image Classification: ViT-S/16 on ImageNet - Following Lion Paper Table 2
+90 epochs, records TOP-1 ACCURACY
 
-CRITICAL HYPERPARAMETERS from Table 12:
-- Lion uses 0.1x LR of AdamW
-- Lion uses 10x WD of AdamW
-- Lion β2=0.99, AdamW β2=0.999
+Lion Paper Table 2 configs (ViT-S/16 RandAug):
+- AdamW: lr=3e-3, wd=0.1, β=(0.9, 0.999)
+- Lion: lr=3e-4 (0.1x), wd=1.0 (10x), β=(0.9, 0.99)
 """
-import sys
-def _patch_dill():
-    try:
-        import dill
-        if not hasattr(dill, 'extend'): dill.extend = lambda use_dill=True: None
-    except ImportError: pass
-_patch_dill()
-
 import os, gc, time, math, random, json, logging, argparse
 from pathlib import Path
 import numpy as np
@@ -26,308 +17,439 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.optim import Optimizer
 from torch.utils.checkpoint import checkpoint
 import torchvision.transforms as T
-from torchvision.datasets import ImageFolder, CIFAR100
-from torchvision.models import resnet50
+from torchvision.datasets import ImageFolder
 import warnings; warnings.filterwarnings('ignore')
 
+from optimizers import Lion, RLO, RLO_LambdaA, SmoothLiftedRLO, create_optimizer
+
+
 def setup_logger(out, rank, name):
-    logger = logging.getLogger(name); logger.setLevel(logging.DEBUG); logger.handlers.clear()
-    fh = logging.FileHandler(out / f"{name}_rank{rank}.log", mode='w'); fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter('%(asctime)s | %(message)s')); logger.addHandler(fh)
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    fh = logging.FileHandler(out / f"{name}_rank{rank}.log", mode='w')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter('%(asctime)s | %(message)s'))
+    logger.addHandler(fh)
     if rank == 0:
-        ch = logging.StreamHandler(); ch.setLevel(logging.INFO)
-        ch.setFormatter(logging.Formatter('%(asctime)s | %(message)s', datefmt='%H:%M:%S')); logger.addHandler(ch)
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(logging.Formatter('%(asctime)s | %(message)s', datefmt='%H:%M:%S'))
+        logger.addHandler(ch)
     return logger
 
-class Lion(Optimizer):
-    def __init__(self, params, lr=1e-4, betas=(0.9, 0.99), weight_decay=0.0):
-        super().__init__(params, dict(lr=lr, betas=betas, weight_decay=weight_decay))
-    @torch.no_grad()
-    def step(self, closure=None):
-        for g in self.param_groups:
-            for p in g['params']:
-                if p.grad is None: continue
-                if g['weight_decay'] != 0: p.mul_(1 - g['lr'] * g['weight_decay'])
-                s = self.state[p]
-                if len(s) == 0: s['m'] = torch.zeros_like(p)
-                m = s['m']; b1, b2 = g['betas']
-                p.add_((b1 * m + (1 - b1) * p.grad).sign_(), alpha=-g['lr'])
-                m.mul_(b2).add_(p.grad, alpha=1 - b2)
 
-class RLO(Optimizer):
-    def __init__(self, params, lr=1e-4, betas=(0.9, 0.99), weight_decay=0.0, belief_coef=0.1, eps=1e-8):
-        super().__init__(params, dict(lr=lr, betas=betas, weight_decay=weight_decay, belief_coef=belief_coef, eps=eps))
-    @torch.no_grad()
-    def step(self, closure=None):
-        for g in self.param_groups:
-            for p in g["params"]:
-                if p.grad is None: continue
-                if g["weight_decay"] != 0: p.mul_(1 - g["lr"] * g["weight_decay"])
-                s = self.state[p]
-                if len(s) == 0: s["m"] = torch.zeros_like(p)
-                m, gr = s["m"], p.grad; b1, b2 = g["betas"]
-                c = b1 * m + (1 - b1) * gr; delta = gr - m
-                p.add_(c.sign() + g["belief_coef"] * (delta / delta.norm().clamp(min=g["eps"])), alpha=-g["lr"])
-                m.mul_(b2).add_(gr, alpha=1 - b2)
-
-class RLO_LambdaA(Optimizer):
-    def __init__(self, params, lr=1e-4, beta1=0.9, beta2=0.99, beta3=0.999, weight_decay=0.0, lambda_b=0.1, eps=1e-8, gamma=5.0):
-        super().__init__(params, dict(lr=lr, beta1=beta1, beta2=beta2, beta3=beta3, weight_decay=weight_decay, lambda_b=lambda_b, eps=eps, gamma=gamma))
-        self.sqrt_dim = math.sqrt(sum(p.numel() for g in self.param_groups for p in g["params"]))
-    @torch.no_grad()
-    def step(self, closure=None):
-        all_sp, all_b, all_p = [], [], []
-        for g in self.param_groups:
-            for p in g["params"]:
-                if p.grad is None: continue
-                gr, s = p.grad, self.state[p]
-                if len(s) == 0: s["m"], s["s"] = torch.zeros_like(p), torch.zeros_like(p)
-                m, ss = s["m"], s["s"]
-                ss.mul_(g["beta3"]).addcmul_(gr, gr, value=1 - g["beta3"])
-                c = g["beta1"] * m + (1 - g["beta1"]) * gr
-                sp = torch.tanh(g["gamma"] * c) / (ss.sqrt() + g["eps"])
-                delta = gr - m; b = g["lambda_b"] * (delta / delta.norm().clamp(min=g["eps"]))
-                all_sp.append(sp); all_b.append(b); all_p.append((p, g, m, gr))
-        if not all_p: return
-        scale = self.sqrt_dim / sum((x * x).sum() for x in all_sp).sqrt().clamp(min=1e-8)
-        for (p, g, m, gr), sp, b in zip(all_p, all_sp, all_b):
-            if g["weight_decay"] != 0: p.mul_(1 - g["lr"] * g["weight_decay"])
-            p.add_(scale * sp + b, alpha=-g["lr"]); m.mul_(g["beta2"]).add_(gr, alpha=1 - g["beta2"])
-
-class SmoothLiftedRLO(Optimizer):
-    def __init__(self, params, lr=1e-4, beta1=0.9, beta2=0.99, eta=0.3, weight_decay=0.0, lambda_b=0.1, eps=1e-8, gamma=5.0):
-        super().__init__(params, dict(lr=lr, beta1=beta1, beta2=beta2, eta=eta, weight_decay=weight_decay, lambda_b=lambda_b, eps=eps, gamma=gamma))
-        self.sqrt_dim = math.sqrt(sum(p.numel() for g in self.param_groups for p in g["params"]))
-    @torch.no_grad()
-    def step(self, closure=None):
-        all_s, all_b, all_p = [], [], []
-        for g in self.param_groups:
-            for p in g["params"]:
-                if p.grad is None: continue
-                s = self.state[p]
-                if len(s) == 0: s["m"], s["v"] = torch.zeros_like(p), torch.zeros_like(p)
-                gr, m = p.grad, s["m"]
-                c = g["beta1"] * m + (1 - g["beta1"]) * gr; ss = torch.tanh(g["gamma"] * c)
-                delta = gr - m; b = g["lambda_b"] * (delta / delta.norm().clamp(min=g["eps"]))
-                all_s.append(ss); all_b.append(b); all_p.append((p, g))
-        if not all_p: return
-        scale = self.sqrt_dim / sum((x * x).sum() for x in all_s).sqrt().clamp(min=1e-8)
-        for (p, g), ss, b in zip(all_p, all_s, all_b):
-            s = self.state[p]
-            if g["weight_decay"] != 0: p.mul_(1 - g["lr"] * g["weight_decay"])
-            d = scale * ss + b; s["v"].mul_(1 - g["eta"]).add_(d, alpha=g["eta"])
-            p.add_(s["v"], alpha=-g["lr"]); s["m"].mul_(g["beta2"]).add_(p.grad, alpha=1 - g["beta2"])
-
-class Attn(nn.Module):
-    def __init__(self, d, h=8):
-        super().__init__(); self.h, self.hd = h, d // h
-        self.qkv, self.proj = nn.Linear(d, d * 3), nn.Linear(d, d)
+class MultiHeadAttention(nn.Module):
+    def __init__(self, dim, num_heads=6):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(dim, dim * 3)
+        self.proj = nn.Linear(dim, dim)
+    
     def forward(self, x):
         B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.h, self.hd).permute(2, 0, 3, 1, 4)
-        return self.proj(F.scaled_dot_product_attention(*qkv.unbind(0)).transpose(1, 2).reshape(B, N, C))
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        
+        # Use flash attention if available
+        x = F.scaled_dot_product_attention(q, k, v)
+        x = x.transpose(1, 2).reshape(B, N, C)
+        return self.proj(x)
 
-class Blk(nn.Module):
-    def __init__(self, d, h):
-        super().__init__(); self.n1, self.attn, self.n2 = nn.LayerNorm(d), Attn(d, h), nn.LayerNorm(d)
-        self.mlp = nn.Sequential(nn.Linear(d, d * 4), nn.GELU(), nn.Linear(d * 4, d))
-    def forward(self, x): x = x + self.attn(self.n1(x)); return x + self.mlp(self.n2(x))
+
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = MultiHeadAttention(dim, num_heads)
+        self.norm2 = nn.LayerNorm(dim)
+        mlp_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Linear(mlp_dim, dim)
+        )
+    
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
+
 
 class ViT(nn.Module):
-    def __init__(self, d=384, depth=12, h=6, nc=1000):
+    """Vision Transformer - ViT-S/16 configuration."""
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000,
+                 embed_dim=384, depth=12, num_heads=6, use_checkpoint=True):
         super().__init__()
-        self.pe = nn.Conv2d(3, d, 16, 16)
-        self.cls, self.pos = nn.Parameter(torch.zeros(1, 1, d)), nn.Parameter(torch.zeros(1, 197, d))
-        self.blks = nn.ModuleList([Blk(d, h) for _ in range(depth)])
-        self.n, self.head = nn.LayerNorm(d), nn.Linear(d, nc)
-        nn.init.trunc_normal_(self.pos, std=0.02); nn.init.trunc_normal_(self.cls, std=0.02)
+        self.use_checkpoint = use_checkpoint
+        
+        num_patches = (img_size // patch_size) ** 2
+        
+        self.patch_embed = nn.Conv2d(in_chans, embed_dim, patch_size, patch_size)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        
+        self.blocks = nn.ModuleList([
+            TransformerBlock(embed_dim, num_heads) for _ in range(depth)
+        ])
+        
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
+        
+        # Initialize
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+    
     def forward(self, x):
-        B = x.shape[0]; x = self.pe(x).flatten(2).transpose(1, 2)
-        x = torch.cat([self.cls.expand(B, -1, -1), x], 1) + self.pos
-        for b in self.blks: x = checkpoint(b, x, use_reentrant=False) if self.training else b(x)
-        return self.head(self.n(x[:, 0]))
+        B = x.shape[0]
+        x = self.patch_embed(x).flatten(2).transpose(1, 2)
+        
+        cls = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls, x], dim=1)
+        x = x + self.pos_embed
+        
+        for block in self.blocks:
+            if self.training and self.use_checkpoint:
+                x = checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
+        
+        x = self.norm(x[:, 0])
+        return self.head(x)
 
-def create_model(name, nc=1000):
-    if name == 'resnet50': return resnet50(weights=None, num_classes=nc)
-    if name == 'vit_s16': return ViT(d=384, depth=12, h=6, nc=nc)
-    if name == 'vit_b16': return ViT(d=768, depth=12, h=12, nc=nc)
-    raise ValueError(name)
-
-def create_cifar100_loader(path, bs, train, ws, rank):
-    tf = T.Compose([T.RandomCrop(32, padding=4), T.RandomHorizontalFlip(), T.ToTensor(),
-                   T.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))]) if train else \
-         T.Compose([T.ToTensor(), T.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))])
-    ds = CIFAR100(root=path, train=train, download=True, transform=tf)
-    samp = DistributedSampler(ds, ws, rank, shuffle=train) if ws > 1 else None
-    return DataLoader(ds, bs, shuffle=(samp is None and train), sampler=samp, num_workers=4, pin_memory=True, drop_last=train), samp
-
-def create_imagenet_loader(path, bs, train, ws, rank, aug=False):
-    M, S = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
-    if train:
-        tfs = [T.RandomResizedCrop(224), T.RandomHorizontalFlip()]
-        if aug: tfs.append(T.RandAugment(2, 15))
-        tfs.extend([T.ToTensor(), T.Normalize(M, S)]); tf, sp = T.Compose(tfs), 'train'
-    else: tf, sp = T.Compose([T.Resize(256), T.CenterCrop(224), T.ToTensor(), T.Normalize(M, S)]), 'val'
-    ds = ImageFolder(path / sp, tf)
-    samp = DistributedSampler(ds, ws, rank, shuffle=train) if ws > 1 else None
-    return DataLoader(ds, bs, shuffle=(samp is None and train), sampler=samp, num_workers=2, pin_memory=True, drop_last=train, persistent_workers=False), samp
 
 class Mixup:
-    def __init__(self, a=0.5, nc=1000): self.a, self.nc = a, nc
+    """Mixup and Cutmix data augmentation."""
+    def __init__(self, mixup_alpha=0.8, cutmix_alpha=1.0, num_classes=1000):
+        self.mixup_alpha = mixup_alpha
+        self.cutmix_alpha = cutmix_alpha
+        self.num_classes = num_classes
+    
     def __call__(self, x, y):
-        lam = np.random.beta(self.a, self.a); idx = torch.randperm(x.size(0), device=x.device)
-        return lam * x + (1 - lam) * x[idx], lam * F.one_hot(y, self.nc).float() + (1 - lam) * F.one_hot(y[idx], self.nc).float()
+        if random.random() < 0.5 and self.mixup_alpha > 0:
+            lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
+        elif self.cutmix_alpha > 0:
+            lam = np.random.beta(self.cutmix_alpha, self.cutmix_alpha)
+        else:
+            return x, F.one_hot(y, self.num_classes).float()
+        
+        batch_size = x.size(0)
+        index = torch.randperm(batch_size, device=x.device)
+        
+        # Mixup
+        x = lam * x + (1 - lam) * x[index]
+        
+        # Soft labels
+        y_onehot = F.one_hot(y, self.num_classes).float()
+        y_mixed = lam * y_onehot + (1 - lam) * y_onehot[index]
+        
+        return x, y_mixed
 
-# ============= LION Paper Table 12 EXACT =============
-CONFIGS = {
-    'resnet50': {
-        'dataset': 'cifar100', 'num_classes': 100, 'epochs': 200, 'global_batch': 128,
-        'warmup_epochs': 5, 'augment': False, 'mixup': False, 'label_smoothing': 0.0,
-        'optimizers': {
-            'sgd': {'lr': 0.1, 'wd': 5e-4, 'momentum': 0.9},
-            'rmsprop': {'lr': 1e-3, 'wd': 1e-4},
-            'adam': {'lr': 1e-3, 'wd': 1e-4},
-            # Table 12 ResNet-50: AdamW lr=3e-3 wd=0.1, Lion lr=3e-4 wd=1.0
-            'adamw': {'lr': 3e-3, 'wd': 0.1, 'betas': (0.9, 0.999)},
-            'lion': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},
-            'rlo': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.9, 0.99), 'belief_coef': 0.1},
-            'rlo_lambda_a': {'lr': 3e-4, 'wd': 1.0, 'lambda_b': 0.1},
-            'smooth_lifted_rlo': {'lr': 3e-4, 'wd': 1.0, 'lambda_b': 0.1, 'eta': 0.3},
-        },
-    },
-    'vit_s16': {
-        'dataset': 'imagenet', 'num_classes': 1000, 'epochs': 300, 'global_batch': 1024,
-        'warmup_epochs': 10, 'augment': True, 'mixup': True, 'label_smoothing': 0.1,
-        'optimizers': {
-            # Table 12 ViT-S/16 RandAug: AdamW lr=3e-3 wd=0.1, Lion lr=3e-4 wd=1.0
-            'adamw': {'lr': 3e-3, 'wd': 0.1, 'betas': (0.9, 0.999)},
-            'lion': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},
-            'rlo': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.9, 0.99), 'belief_coef': 0.1},
-            'rlo_lambda_a': {'lr': 3e-4, 'wd': 1.0, 'lambda_b': 0.1},
-            'smooth_lifted_rlo': {'lr': 3e-4, 'wd': 1.0, 'lambda_b': 0.1, 'eta': 0.3},
-        },
-    },
-    'vit_b16': {
-        'dataset': 'imagenet', 'num_classes': 1000, 'epochs': 300, 'global_batch': 1024,
-        'warmup_epochs': 10, 'augment': True, 'mixup': True, 'label_smoothing': 0.1,
-        'optimizers': {
-            # Table 12 ViT-B/16 RandAug: AdamW lr=1e-3 wd=1.0, Lion lr=1e-4 wd=10.0
-            'adamw': {'lr': 1e-3, 'wd': 1.0, 'betas': (0.9, 0.999)},
-            'lion': {'lr': 1e-4, 'wd': 10.0, 'betas': (0.9, 0.99)},
-            'rlo': {'lr': 1e-4, 'wd': 10.0, 'betas': (0.9, 0.99), 'belief_coef': 0.1},
-            'rlo_lambda_a': {'lr': 1e-4, 'wd': 10.0, 'lambda_b': 0.1},
-            'smooth_lifted_rlo': {'lr': 1e-4, 'wd': 10.0, 'lambda_b': 0.1, 'eta': 0.3},
-        },
-    },
-}
 
-def create_optimizer(model, name, cfg):
-    p = model.parameters(); lr, wd = cfg['lr'], cfg['wd']
-    if name == 'sgd': return torch.optim.SGD(p, lr=lr, weight_decay=wd, momentum=cfg.get('momentum', 0.9))
-    if name == 'rmsprop': return torch.optim.RMSprop(p, lr=lr, weight_decay=wd)
-    if name == 'adam': return torch.optim.Adam(p, lr=lr, weight_decay=wd)
-    if name == 'adamw': return torch.optim.AdamW(p, lr=lr, weight_decay=wd, betas=cfg.get('betas', (0.9, 0.999)))
-    if name == 'lion': return Lion(p, lr=lr, weight_decay=wd, betas=cfg.get('betas', (0.9, 0.99)))
-    if name == 'rlo': return RLO(p, lr=lr, weight_decay=wd, betas=cfg.get('betas', (0.9, 0.99)), belief_coef=cfg.get('belief_coef', 0.1))
-    if name == 'rlo_lambda_a': return RLO_LambdaA(p, lr=lr, weight_decay=wd, lambda_b=cfg.get('lambda_b', 0.1))
-    if name == 'smooth_lifted_rlo': return SmoothLiftedRLO(p, lr=lr, weight_decay=wd, lambda_b=cfg.get('lambda_b', 0.1), eta=cfg.get('eta', 0.3))
-    raise ValueError(name)
+class RandAugment:
+    """Simple RandAugment implementation."""
+    def __init__(self, n=2, m=9):
+        self.n = n
+        self.m = m
+    
+    def __call__(self, img):
+        ops = [
+            T.functional.autocontrast,
+            T.functional.equalize,
+            lambda x: T.functional.rotate(x, self.m * 3),
+            lambda x: T.functional.adjust_sharpness(x, 1 + self.m / 10),
+            lambda x: T.functional.adjust_brightness(x, 1 + self.m / 30),
+            lambda x: T.functional.adjust_contrast(x, 1 + self.m / 30),
+        ]
+        
+        for _ in range(self.n):
+            op = random.choice(ops)
+            img = op(img)
+        
+        return img
+
 
 @torch.no_grad()
-def evaluate(model, loader, dev):
-    model.eval(); c, t = 0, 0
-    for x, y in loader:
-        x, y = x.to(dev, non_blocking=True), y.to(dev, non_blocking=True)
-        with torch.autocast('cuda', torch.bfloat16): c += (model(x).argmax(1) == y).sum().item()
-        t += y.size(0)
-    return 100.0 * c / t
+def evaluate(model, loader, device):
+    """Compute top-1 accuracy."""
+    model.eval()
+    correct = 0
+    total = 0
+    
+    for images, labels in loader:
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        
+        with torch.autocast('cuda', torch.bfloat16):
+            outputs = model(images)
+        
+        predictions = outputs.argmax(dim=-1)
+        correct += (predictions == labels).sum().item()
+        total += labels.size(0)
+    
+    return 100.0 * correct / total
 
-def train_one(mname, oname, data, imnet, out, rank, ws, lr, logger):
-    dev = torch.device(f'cuda:{lr}')
-    cfg, ocfg = CONFIGS[mname], CONFIGS[mname]['optimizers'][oname]
-    pg = cfg['global_batch'] // max(1, ws)
-    logger.info(f"{'='*70}\n{mname} | {oname} | {cfg['dataset']}\nLR={ocfg['lr']} WD={ocfg['wd']}\n{'='*70}")
 
-    if cfg['dataset'] == 'cifar100':
-        tl, ts = create_cifar100_loader(data, pg, True, ws, rank)
-        vl, _ = create_cifar100_loader(data, pg, False, 1, 0)
-    else:
-        tl, ts = create_imagenet_loader(imnet, pg, True, ws, rank, cfg['augment'])
-        vl, _ = create_imagenet_loader(imnet, pg, False, 1, 0)
+# ============= Lion Paper Table 2 Configs (ViT-S/16 RandAug) =============
+CONFIGS = {
+    'adamw': {'lr': 3e-3, 'wd': 0.1, 'betas': (0.9, 0.999)},
+    'lion': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},  # 0.1x lr, 10x wd
+    'rlo': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.9, 0.99), 'belief_coef': 0.1},
+    'rlo_lambda_a': {'lr': 3e-4, 'wd': 1.0, 'beta1': 0.9, 'beta2': 0.99, 'lambda_b': 0.1},
+    'smooth_lifted_rlo': {'lr': 3e-4, 'wd': 1.0, 'beta1': 0.9, 'beta2': 0.99, 
+                          'lambda_b': 0.1, 'eta': 0.3},
+}
 
-    model = create_model(mname, cfg['num_classes']).to(dev)
-    if ws > 1: model = DDP(model, device_ids=[lr])
-    logger.info(f"Params: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
 
-    opt = create_optimizer(model, oname, ocfg)
-    total, warmup = len(tl) * cfg['epochs'], len(tl) * cfg['warmup_epochs']
-    def get_lr(s): return ocfg['lr'] * s / max(1, warmup) if s < warmup else ocfg['lr'] * 0.5 * (1 + math.cos(math.pi * (s - warmup) / (total - warmup)))
-
-    mixup = Mixup(nc=cfg['num_classes']) if cfg['mixup'] else None
-    crit = nn.CrossEntropyLoss(label_smoothing=cfg['label_smoothing'])
+def train_classification(opt_name, data_path, output_path, epochs, 
+                        rank, world_size, local_rank, logger):
+    device = torch.device(f'cuda:{local_rank}')
+    cfg = CONFIGS[opt_name]
+    
+    # Batch size: 1024 global, scaled per GPU
+    global_batch = 1024
+    per_gpu_batch = global_batch // world_size
+    
+    # Gradient accumulation if needed to avoid OOM
+    micro_batch = min(per_gpu_batch, 64)  # Max 64 per step to avoid OOM
+    accumulation_steps = per_gpu_batch // micro_batch
+    
+    logger.info("=" * 70)
+    logger.info(f"Classification: ViT-S/16 on ImageNet | {opt_name}")
+    logger.info(f"LR={cfg['lr']}, WD={cfg['wd']}, Epochs={epochs}")
+    logger.info(f"Global batch={global_batch}, Per-GPU={per_gpu_batch}, "
+               f"Micro={micro_batch}, Accum={accumulation_steps}")
+    logger.info("=" * 70)
+    
+    # Data transforms with RandAugment
+    train_transform = T.Compose([
+        T.RandomResizedCrop(224, scale=(0.08, 1.0)),
+        T.RandomHorizontalFlip(),
+        T.TrivialAugmentWide(),  # Built-in augmentation
+        T.ToTensor(),
+        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        T.RandomErasing(p=0.25),
+    ])
+    
+    val_transform = T.Compose([
+        T.Resize(256),
+        T.CenterCrop(224),
+        T.ToTensor(),
+        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+    ])
+    
+    # Datasets
+    train_dataset = ImageFolder(data_path / 'train', train_transform)
+    val_dataset = ImageFolder(data_path / 'val' if (data_path / 'val').exists() 
+                              else data_path / 'train', val_transform)
+    
+    train_sampler = DistributedSampler(train_dataset, world_size, rank) if world_size > 1 else None
+    train_loader = DataLoader(train_dataset, micro_batch,
+                             shuffle=(train_sampler is None),
+                             sampler=train_sampler,
+                             num_workers=12, pin_memory=True, drop_last=True,
+                             persistent_workers=True, prefetch_factor=4)
+    
+    val_loader = DataLoader(val_dataset, micro_batch * 2,
+                           shuffle=False, num_workers=8, pin_memory=True,
+                           prefetch_factor=4)
+    
+    logger.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+    
+    # Model
+    model = ViT(num_classes=1000, use_checkpoint=True).to(device)
+    if world_size > 1:
+        model = DDP(model, device_ids=[local_rank])
+    
+    num_params = sum(p.numel() for p in model.parameters()) / 1e6
+    logger.info(f"Parameters: {num_params:.1f}M")
+    
+    # Optimizer
+    base_model = model.module if hasattr(model, 'module') else model
+    optimizer = create_optimizer(base_model, opt_name, cfg)
+    
     scaler = torch.amp.GradScaler('cuda')
-    hist, best, step = {'loss': [], 'acc': []}, 0.0, 0
-
-    for ep in range(cfg['epochs']):
-        if ts: ts.set_epoch(ep)
-        model.train(); ls = 0.0
-        for x, y in tl:
-            x, y = x.to(dev, non_blocking=True), y.to(dev, non_blocking=True)
-            if mixup: x, ys = mixup(x, y); soft = True
-            else: ys, soft = None, False
-            for g in opt.param_groups: g['lr'] = get_lr(step)
-            opt.zero_grad(set_to_none=True)
+    
+    # Mixup
+    mixup = Mixup(num_classes=1000)
+    
+    # LR schedule
+    steps_per_epoch = len(train_loader) // accumulation_steps
+    total_steps = steps_per_epoch * epochs
+    warmup_steps = steps_per_epoch * 10  # 10 epoch warmup
+    
+    def get_lr(step):
+        if step < warmup_steps:
+            return cfg['lr'] * step / max(1, warmup_steps)
+        else:
+            progress = (step - warmup_steps) / (total_steps - warmup_steps)
+            return cfg['lr'] * 0.5 * (1 + math.cos(math.pi * progress))
+    
+    # Training
+    history = {'loss': [], 'acc': [], 'epoch': []}
+    best_acc = 0.0
+    global_step = 0
+    
+    for epoch in range(epochs):
+        if train_sampler:
+            train_sampler.set_epoch(epoch)
+        
+        model.train()
+        epoch_loss = 0.0
+        num_batches = 0
+        t0 = time.time()
+        
+        optimizer.zero_grad(set_to_none=True)
+        
+        for batch_idx, (images, labels) in enumerate(train_loader):
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            
+            # Mixup
+            images, soft_labels = mixup(images, labels)
+            
+            # Update LR
+            step_in_epoch = batch_idx // accumulation_steps
+            current_step = epoch * steps_per_epoch + step_in_epoch
+            lr = get_lr(current_step)
+            for g in optimizer.param_groups:
+                g['lr'] = lr
+            
+            # Forward + backward
             with torch.autocast('cuda', torch.bfloat16):
-                logits = model(x)
-                loss = -torch.sum(F.log_softmax(logits, 1) * ys, 1).mean() if soft else crit(logits, y)
-            scaler.scale(loss).backward(); scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(opt); scaler.update(); ls += loss.item(); step += 1
-
-        bm = model.module if hasattr(model, 'module') else model
-        acc = evaluate(bm, vl, dev); hist['loss'].append(ls / len(tl)); hist['acc'].append(acc)
-        ib = acc > best; best = max(acc, best)
-        if (ep + 1) % 10 == 0 or ep == cfg['epochs'] - 1:
-            logger.info(f"E{ep+1:3d}: loss={ls/len(tl):.4f} acc={acc:.2f}%{'*' if ib else ''}")
-        if ib and rank == 0: torch.save({'model': bm.state_dict(), 'acc': best}, out / f"{mname}_{oname}_best.pt")
-
+                outputs = model(images)
+                loss = -(F.log_softmax(outputs, dim=-1) * soft_labels).sum(dim=-1).mean()
+                loss = loss / accumulation_steps
+            
+            scaler.scale(loss).backward()
+            epoch_loss += loss.item() * accumulation_steps
+            
+            # Step optimizer
+            if (batch_idx + 1) % accumulation_steps == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
+            
+            num_batches += 1
+        
+        avg_loss = epoch_loss / num_batches
+        
+        # Evaluate every 10 epochs
+        acc = 0.0
+        if (epoch + 1) % 10 == 0 or epoch == epochs - 1:
+            base_model = model.module if hasattr(model, 'module') else model
+            acc = evaluate(base_model, val_loader, device)
+            
+            is_best = acc > best_acc
+            best_acc = max(acc, best_acc)
+            
+            history['loss'].append(avg_loss)
+            history['acc'].append(acc)
+            history['epoch'].append(epoch + 1)
+            
+            logger.info(f"E{epoch+1:3d}: loss={avg_loss:.4f} acc={acc:.2f}%{'*' if is_best else ''} "
+                       f"lr={lr:.2e} time={time.time()-t0:.0f}s")
+            
+            if is_best and rank == 0:
+                torch.save({
+                    'model': base_model.state_dict(),
+                    'acc': best_acc,
+                    'epoch': epoch
+                }, output_path / f"vit_s16_{opt_name}_best.pt")
+        else:
+            logger.info(f"E{epoch+1:3d}: loss={avg_loss:.4f} lr={lr:.2e} time={time.time()-t0:.0f}s")
+    
+    # Save results
     if rank == 0:
-        with open(out / f"{mname}_{oname}_results.json", 'w') as f:
-            json.dump({'model': mname, 'opt': oname, 'config': ocfg, 'best_acc': best, 'hist': hist}, f, indent=2)
-        logger.info(f"Best: {best:.2f}%")
-    return best
+        results = {
+            'optimizer': opt_name,
+            'config': cfg,
+            'best_acc': best_acc,
+            'history': history
+        }
+        with open(output_path / f"vit_s16_{opt_name}_results.json", 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        logger.info(f"Final: Best Acc = {best_acc:.2f}%")
+    
+    return best_acc
+
 
 def main():
-    pa = argparse.ArgumentParser()
-    pa.add_argument('--model', required=True, choices=['resnet50', 'vit_s16', 'vit_b16'])
-    pa.add_argument('--optimizer', default='all')
-    pa.add_argument('--data', default='/blue/wdixon/wang.yixuan/rlo_experiments/data')
-    pa.add_argument('--imagenet', default='/blue/wdixon/wang.yixuan/lypcdf/imagenet_folder')
-    pa.add_argument('--output', default='/blue/wdixon/wang.yixuan/rlo_experiments/classification')
-    args = pa.parse_args()
-
-    torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--optimizer', default='all')
+    parser.add_argument('--data', default='/blue/wdixon/wang.yixuan/lypcdf/imagenet_folder')
+    parser.add_argument('--output', default='/blue/wdixon/wang.yixuan/rlo_experiments/classification')
+    parser.add_argument('--epochs', type=int, default=90)
+    args = parser.parse_args()
+    
+    # Setup
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
-    random.seed(42); np.random.seed(42); torch.manual_seed(42)
-
+    
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    
+    # Distributed
     if 'RANK' in os.environ:
-        rank, ws, lr = int(os.environ['RANK']), int(os.environ['WORLD_SIZE']), int(os.environ['LOCAL_RANK'])
-        torch.cuda.set_device(lr); dist.init_process_group('nccl')
-    else: rank, ws, lr = 0, 1, 0
-
-    out = Path(args.output); out.mkdir(exist_ok=True, parents=True)
-    logger = setup_logger(out, rank, f"cls_{args.model}")
-    opts = list(CONFIGS[args.model]['optimizers'].keys()) if args.optimizer == 'all' else [args.optimizer]
-    res = {}
-    for o in opts:
-        try: gc.collect(); torch.cuda.empty_cache(); res[o] = train_one(args.model, o, Path(args.data), Path(args.imagenet), out, rank, ws, lr, logger)
-        except Exception as e: logger.error(f"Error {o}: {e}"); import traceback; logger.error(traceback.format_exc())
-    if rank == 0 and res:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group('nccl')
+    else:
+        rank, world_size, local_rank = 0, 1, 0
+    
+    output_path = Path(args.output)
+    output_path.mkdir(exist_ok=True, parents=True)
+    
+    logger = setup_logger(output_path, rank, "classification")
+    
+    # Run experiments
+    optimizers = list(CONFIGS.keys()) if args.optimizer == 'all' else [args.optimizer]
+    results = {}
+    
+    for opt in optimizers:
+        try:
+            gc.collect()
+            torch.cuda.empty_cache()
+            results[opt] = train_classification(opt, Path(args.data), output_path,
+                                               args.epochs, rank, world_size, 
+                                               local_rank, logger)
+        except Exception as e:
+            logger.error(f"Error with {opt}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    # Summary
+    if rank == 0 and results:
         logger.info("=" * 70)
-        for o, a in sorted(res.items(), key=lambda x: x[1], reverse=True): logger.info(f"  {o}: {a:.2f}%")
-    dist.is_initialized() and dist.destroy_process_group()
+        logger.info("Classification Results (Top-1 Accuracy %):")
+        for opt, acc in sorted(results.items(), key=lambda x: x[1], reverse=True):
+            logger.info(f"  {opt}: {acc:.2f}%")
+    
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
-if __name__ == '__main__': main()
+
+if __name__ == '__main__':
+    main()
