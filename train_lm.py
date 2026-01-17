@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Language Modeling Experiment - Following Lion Paper Figure 7
-GPT-2 style, records LOG PERPLEXITY (like Figure 7)
+GPT-2 style, records PERPLEXITY (lower is better)
 
 Lion Paper configs (LM):
 - AdamW: lr=3e-3, β=(0.9, 0.99)
 - Lion: lr=3e-4 (0.1x), β=(0.95, 0.98) - DIFFERENT BETAS FOR LM!
 """
-import os, gc, time, math, random, json, logging, argparse
+import os, gc, time, math, json, logging, argparse, sys
 from pathlib import Path
 import numpy as np
 import torch
@@ -19,7 +19,11 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 import warnings; warnings.filterwarnings('ignore')
 
-from optimizers import Lion, RLO, RLO_LambdaA, SmoothLiftedRLO, create_optimizer
+try:
+    from optimizers import create_optimizer
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).parent))
+    from optimizers import create_optimizer
 
 
 def setup_logger(out, rank, name):
@@ -44,24 +48,15 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        
         self.qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
-        
-        # Register causal mask
-        self.register_buffer('mask', torch.tril(torch.ones(max_len, max_len)))
     
     def forward(self, x):
         B, T, C = x.shape
-        
         qkv = self.qkv(x).reshape(B, T, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
-        
-        # Use Flash Attention with causal mask
         x = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        x = x.transpose(1, 2).reshape(B, T, C)
-        
-        return self.proj(x)
+        return self.proj(x.transpose(1, 2).reshape(B, T, C))
 
 
 class TransformerBlock(nn.Module):
@@ -71,377 +66,348 @@ class TransformerBlock(nn.Module):
         self.ln1 = nn.LayerNorm(dim)
         self.attn = CausalSelfAttention(dim, num_heads, max_len)
         self.ln2 = nn.LayerNorm(dim)
-        
         mlp_dim = int(dim * mlp_ratio)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, mlp_dim),
-            nn.GELU(),
-            nn.Linear(mlp_dim, dim)
-        )
+        self.mlp = nn.Sequential(nn.Linear(dim, mlp_dim), nn.GELU(), nn.Linear(mlp_dim, dim))
     
     def forward(self, x):
         x = x + self.attn(self.ln1(x))
-        x = x + self.mlp(self.ln2(x))
-        return x
+        return x + self.mlp(self.ln2(x))
 
 
 class GPT2(nn.Module):
-    """GPT-2 117M style model."""
+    """GPT-2 style language model."""
     def __init__(self, vocab_size=50257, dim=768, num_heads=12, num_layers=12, max_len=1024):
         super().__init__()
-        self.max_len = max_len
-        
         self.token_embed = nn.Embedding(vocab_size, dim)
-        self.pos_embed = nn.Embedding(max_len, dim)
-        
-        self.blocks = nn.ModuleList([
-            TransformerBlock(dim, num_heads, max_len) for _ in range(num_layers)
-        ])
-        
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_len, dim))
+        self.blocks = nn.ModuleList([TransformerBlock(dim, num_heads, max_len) for _ in range(num_layers)])
         self.ln_f = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, vocab_size, bias=False)
         
         # Weight tying
-        self.token_embed.weight = self.head.weight
+        self.head.weight = self.token_embed.weight
         
-        # Initialize
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
         self.apply(self._init_weights)
-        
-        # Special initialization for residual projections
-        for name, p in self.named_parameters():
-            if name.endswith('proj.weight') or name.endswith('mlp.2.weight'):
-                nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * num_layers))
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.normal_(module.weight, std=0.02)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        elif isinstance(module, nn.LayerNorm):
-            nn.init.ones_(module.weight)
-            nn.init.zeros_(module.bias)
+            nn.init.normal_(module.weight, std=0.02)
     
-    def forward(self, idx, targets=None):
+    def forward(self, idx):
         B, T = idx.shape
-        
-        x = self.token_embed(idx) + self.pos_embed(torch.arange(T, device=idx.device))
-        
+        x = self.token_embed(idx) + self.pos_embed[:, :T]
         for block in self.blocks:
             x = block(x)
-        
         x = self.ln_f(x)
-        logits = self.head(x)
-        
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-        
-        return logits, loss
-    
-    def num_params(self):
-        return sum(p.numel() for p in self.parameters())
+        return self.head(x)
 
 
 class TextDataset(Dataset):
-    """Simple text dataset."""
-    def __init__(self, data_path, seq_len=1024, split='train'):
+    """Simple text dataset for language modeling."""
+    def __init__(self, data_path, seq_len=1024, tokenizer=None):
         self.seq_len = seq_len
-        data_path = Path(data_path)
         
-        # Try to load pre-tokenized data
-        token_file = data_path / f'{split}_tokens.bin'
-        if token_file.exists():
-            self.tokens = np.memmap(token_file, dtype=np.uint16, mode='r')
-            self.vocab_size = 50257
+        # Try to load tokenizer
+        self.tokenizer = tokenizer
+        if self.tokenizer is None:
+            try:
+                from transformers import GPT2Tokenizer
+                self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+            except Exception:
+                self.tokenizer = None
+        
+        # Load text
+        if isinstance(data_path, str):
+            data_path = Path(data_path)
+        
+        # Find text file
+        if data_path.is_file():
+            text_file = data_path
+        elif (data_path / 'train.txt').exists():
+            text_file = data_path / 'train.txt'
+        elif (data_path / 'wiki.train.raw').exists():
+            text_file = data_path / 'wiki.train.raw'
         else:
-            # Fall back to character-level
-            text_file = data_path / f'{split}.txt'
-            if text_file.exists():
-                with open(text_file, 'r', errors='ignore') as f:
-                    text = f.read()
-                chars = sorted(set(text))
-                self.vocab_size = len(chars)
-                char_to_idx = {c: i for i, c in enumerate(chars)}
-                self.tokens = np.array([char_to_idx.get(c, 0) for c in text], dtype=np.int64)
+            # Try to find any .txt file
+            txt_files = list(data_path.glob('*.txt'))
+            if txt_files:
+                text_file = txt_files[0]
             else:
-                # Random tokens for testing
-                self.vocab_size = 50257
-                self.tokens = np.random.randint(0, 50257, 10_000_000, dtype=np.int64)
+                raise FileNotFoundError(f"No text file found in {data_path}")
         
-        self.num_samples = (len(self.tokens) - 1) // seq_len
+        print(f"Loading text from: {text_file}")
+        
+        with open(text_file, 'r', encoding='utf-8') as f:
+            text = f.read()
+        
+        # Tokenize
+        if self.tokenizer:
+            self.tokens = self.tokenizer.encode(text)
+        else:
+            # Simple byte-level tokenization
+            self.tokens = [ord(c) % 50257 for c in text]
+        
+        self.tokens = torch.tensor(self.tokens, dtype=torch.long)
+        print(f"Total tokens: {len(self.tokens):,}")
     
     def __len__(self):
-        return self.num_samples
+        return max(1, (len(self.tokens) - 1) // self.seq_len)
     
     def __getitem__(self, idx):
         start = idx * self.seq_len
-        chunk = self.tokens[start:start + self.seq_len + 1]
-        x = torch.from_numpy(chunk[:-1].astype(np.int64))
-        y = torch.from_numpy(chunk[1:].astype(np.int64))
+        end = min(start + self.seq_len + 1, len(self.tokens))
+        chunk = self.tokens[start:end]
+        
+        # Pad if necessary
+        if len(chunk) < self.seq_len + 1:
+            chunk = F.pad(chunk, (0, self.seq_len + 1 - len(chunk)))
+        
+        x = chunk[:-1]
+        y = chunk[1:]
         return x, y
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, max_batches=50):
+def evaluate(model, loader, device):
     """Compute perplexity on validation set."""
     model.eval()
-    total_loss = 0.0
+    total_loss = 0
     total_tokens = 0
     
-    for i, (x, y) in enumerate(loader):
-        if i >= max_batches:
-            break
-        
-        x = x.to(device)
-        y = y.to(device)
-        
-        with torch.autocast('cuda', torch.bfloat16):
-            _, loss = model(x, y)
-        
-        total_loss += loss.item() * y.numel()
+    for x, y in loader:
+        x, y = x.to(device), y.to(device)
+        with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+            logits = model(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1), reduction='sum')
+        total_loss += loss.item()
         total_tokens += y.numel()
     
-    avg_loss = total_loss / max(total_tokens, 1)
-    perplexity = math.exp(avg_loss)
-    
+    avg_loss = total_loss / total_tokens
+    perplexity = math.exp(min(avg_loss, 20))  # Clamp to avoid overflow
     return perplexity
 
 
-# ============= Lion Paper Configs (LM) =============
-# CRITICAL: LM uses different betas for Lion! β=(0.95, 0.98)
-CONFIGS = {
-    'adamw': {'lr': 3e-3, 'wd': 0.0, 'betas': (0.9, 0.99)},
-    'lion': {'lr': 3e-4, 'wd': 0.0, 'betas': (0.95, 0.98)},  # Different betas!
-    'rlo': {'lr': 3e-4, 'wd': 0.0, 'betas': (0.95, 0.98), 'belief_coef': 0.1},
-    'rlo_lambda_a': {'lr': 3e-4, 'wd': 0.0, 'beta1': 0.95, 'beta2': 0.98, 'lambda_b': 0.1},
-    'smooth_lifted_rlo': {'lr': 3e-4, 'wd': 0.0, 'beta1': 0.95, 'beta2': 0.98, 
-                          'lambda_b': 0.1, 'eta': 0.3},
-}
-
-
-def train_lm(opt_name, data_path, output_path, total_steps,
-            rank, world_size, local_rank, logger):
-    device = torch.device(f'cuda:{local_rank}')
-    cfg = CONFIGS[opt_name]
+def train_lm(optimizer_name, data_path, output_dir, total_steps, rank, world_size, device, logger):
+    """Train language model with specified optimizer."""
     
-    # Batch size: global 512, seq_len 1024
-    global_batch = 512
-    seq_len = 1024
-    per_gpu_batch = global_batch // world_size
+    # Hyperparameters from Lion paper
+    # IMPORTANT: Lion uses different betas for LM!
+    configs = {
+        'adamw': {'lr': 3e-3, 'wd': 0.1, 'betas': (0.9, 0.99)},
+        'lion': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.95, 0.98)},  # Different betas!
+        'rlo': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.95, 0.98)},
+        'rlo_lambda_a': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.95, 0.98)},
+        'smooth_lifted_rlo': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.95, 0.98)},
+    }
     
-    # Use gradient accumulation to avoid OOM
-    micro_batch = min(per_gpu_batch, 8)  # 8 sequences per micro-batch
-    accumulation_steps = per_gpu_batch // micro_batch
+    cfg = configs.get(optimizer_name, configs['adamw'])
     
-    logger.info("=" * 70)
-    logger.info(f"Language Modeling | {opt_name}")
-    logger.info(f"LR={cfg['lr']}, Betas={cfg.get('betas', (cfg.get('beta1'), cfg.get('beta2')))}")
-    logger.info(f"Global batch={global_batch}, Steps={total_steps}")
-    logger.info(f"Micro batch={micro_batch}, Accum={accumulation_steps}")
-    logger.info("=" * 70)
+    if rank == 0:
+        logger.info("=" * 70)
+        logger.info(f"Language Model Training: {optimizer_name}")
+        logger.info(f"LR={cfg['lr']}, WD={cfg['wd']}, Betas={cfg['betas']}")
+        logger.info("=" * 70)
+    
+    # Try to load GPT2 tokenizer
+    tokenizer = None
+    try:
+        from transformers import GPT2Tokenizer
+        tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        if rank == 0:
+            logger.info("Using GPT2 tokenizer")
+    except Exception as e:
+        if rank == 0:
+            logger.warning(f"Could not load GPT2 tokenizer: {e}")
+            logger.info("Using byte-level tokenization")
     
     # Data
-    train_dataset = TextDataset(data_path, seq_len, 'train')
-    val_dataset = TextDataset(data_path, seq_len, 'valid') if (Path(data_path) / 'valid.txt').exists() else train_dataset
+    seq_len = 1024
+    batch_size = 8  # Per GPU
     
-    train_sampler = DistributedSampler(train_dataset, world_size, rank) if world_size > 1 else None
-    train_loader = DataLoader(train_dataset, micro_batch,
-                             shuffle=(train_sampler is None),
-                             sampler=train_sampler,
-                             num_workers=8, pin_memory=True, drop_last=True,
-                             persistent_workers=True, prefetch_factor=4)
+    try:
+        train_dataset = TextDataset(data_path, seq_len, tokenizer)
+    except Exception as e:
+        if rank == 0:
+            logger.error(f"Failed to load dataset: {e}")
+        raise
     
-    val_loader = DataLoader(val_dataset, micro_batch * 2,
-                           shuffle=False, num_workers=4, pin_memory=True,
-                           prefetch_factor=4)
+    if rank == 0:
+        logger.info(f"Dataset size: {len(train_dataset)} sequences")
     
-    logger.info(f"Train samples: {len(train_dataset)}, Vocab: {train_dataset.vocab_size}")
+    sampler = DistributedSampler(train_dataset, world_size, rank) if world_size > 1 else None
+    loader = DataLoader(train_dataset, batch_size, shuffle=(sampler is None),
+                       sampler=sampler, num_workers=4, pin_memory=True,
+                       drop_last=True, persistent_workers=True)
     
-    # Model
-    model = GPT2(vocab_size=train_dataset.vocab_size, max_len=seq_len).to(device)
+    # Model: GPT-2 Small (117M params)
+    model = GPT2(vocab_size=50257, dim=768, num_heads=12, num_layers=12, max_len=seq_len).to(device)
+    
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank])
+        model = DDP(model, device_ids=[rank])
     
-    base_model = model.module if hasattr(model, 'module') else model
-    num_params = base_model.num_params() / 1e6
-    logger.info(f"Parameters: {num_params:.1f}M")
+    if rank == 0:
+        params = sum(p.numel() for p in model.parameters()) / 1e6
+        logger.info(f"Parameters: {params:.1f}M")
     
-    # Optimizer with weight decay on non-bias, non-layernorm params
+    # Optimizer with weight decay only on certain params
     decay_params = []
     no_decay_params = []
-    for name, param in base_model.named_parameters():
-        if param.requires_grad:
-            if 'bias' in name or 'ln' in name or 'pos' in name:
-                no_decay_params.append(param)
-            else:
-                decay_params.append(param)
+    for name, param in model.named_parameters():
+        if 'bias' in name or 'ln' in name or 'embed' in name:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
     
     param_groups = [
         {'params': decay_params, 'weight_decay': cfg['wd']},
         {'params': no_decay_params, 'weight_decay': 0.0}
     ]
     
-    optimizer = create_optimizer(None, opt_name, cfg, param_groups)
-    scaler = torch.amp.GradScaler('cuda')
+    optimizer = create_optimizer(optimizer_name, param_groups,
+                                lr=cfg['lr'], weight_decay=cfg['wd'],
+                                betas=cfg['betas'])
     
-    # LR schedule
-    warmup_steps = 2000
+    # LR scheduler: cosine with warmup
+    warmup_steps = min(2000, total_steps // 10)
     
-    def get_lr(step):
+    def lr_lambda(step):
         if step < warmup_steps:
-            return cfg['lr'] * step / max(1, warmup_steps)
-        else:
-            progress = (step - warmup_steps) / (total_steps - warmup_steps)
-            return cfg['lr'] * 0.1 + 0.9 * cfg['lr'] * 0.5 * (1 + math.cos(math.pi * progress))
+            return step / warmup_steps
+        progress = (step - warmup_steps) / (total_steps - warmup_steps)
+        return 0.5 * (1 + math.cos(math.pi * progress))
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     # Training
-    history = {'loss': [], 'ppl': [], 'step': []}
+    scaler = torch.amp.GradScaler()
     best_ppl = float('inf')
+    results = {'optimizer': optimizer_name, 'history': []}
     
-    global_step = 0
+    model.train()
+    step = 0
     epoch = 0
-    train_iter = iter(train_loader)
     
-    running_loss = 0.0
-    t0 = time.time()
-    
-    while global_step < total_steps:
-        model.train()
-        optimizer.zero_grad(set_to_none=True)
+    while step < total_steps:
+        epoch += 1
+        if sampler:
+            sampler.set_epoch(epoch)
         
-        for _ in range(accumulation_steps):
-            try:
-                x, y = next(train_iter)
-            except StopIteration:
-                epoch += 1
-                if train_sampler:
-                    train_sampler.set_epoch(epoch)
-                train_iter = iter(train_loader)
-                x, y = next(train_iter)
+        for x, y in loader:
+            if step >= total_steps:
+                break
             
-            x = x.to(device)
-            y = y.to(device)
+            x, y = x.to(device), y.to(device)
             
-            with torch.autocast('cuda', torch.bfloat16):
-                _, loss = model(x, y)
-                loss = loss / accumulation_steps
+            optimizer.zero_grad()
+            
+            with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+                logits = model(x)
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
             
             scaler.scale(loss).backward()
-            running_loss += loss.item() * accumulation_steps
-        
-        # Update LR
-        lr = get_lr(global_step)
-        for g in optimizer.param_groups:
-            g['lr'] = lr
-        
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        scaler.step(optimizer)
-        scaler.update()
-        
-        global_step += 1
-        
-        # Log every 100 steps
-        if global_step % 100 == 0:
-            tokens_per_sec = (100 * global_batch * seq_len) / (time.time() - t0)
-            logger.info(f"Step {global_step:5d}/{total_steps}: loss={running_loss/100:.4f} "
-                       f"lr={lr:.2e} {tokens_per_sec/1e6:.2f}M tok/s")
-            running_loss = 0.0
-            t0 = time.time()
-        
-        # Evaluate every 2000 steps
-        if global_step % 2000 == 0 or global_step == total_steps:
-            base_model = model.module if hasattr(model, 'module') else model
-            ppl = evaluate(base_model, val_loader, device)
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
             
-            is_best = ppl < best_ppl
-            best_ppl = min(ppl, best_ppl)
+            step += 1
             
-            history['step'].append(global_step)
-            history['ppl'].append(ppl)
-            
-            logger.info(f"Step {global_step}: PPL={ppl:.2f}{'*' if is_best else ''}")
-            
-            if is_best and rank == 0:
-                torch.save({
-                    'model': base_model.state_dict(),
-                    'ppl': best_ppl,
-                    'step': global_step
-                }, output_path / f"lm_{opt_name}_best.pt")
+            # Log every 2000 steps
+            if rank == 0 and step % 2000 == 0:
+                ppl = math.exp(min(loss.item(), 20))
+                results['history'].append({'step': step, 'loss': loss.item(), 'ppl': ppl})
+                
+                if ppl < best_ppl:
+                    best_ppl = ppl
+                    logger.info(f"Step {step:6d}: loss={loss.item():.4f} ppl={ppl:.2f}*")
+                else:
+                    logger.info(f"Step {step:6d}: loss={loss.item():.4f} ppl={ppl:.2f}")
     
-    # Save results
     if rank == 0:
-        results = {
-            'optimizer': opt_name,
-            'config': cfg,
-            'best_ppl': best_ppl,
-            'history': history
-        }
-        with open(output_path / f"lm_{opt_name}_results.json", 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        logger.info(f"Final: Best PPL = {best_ppl:.2f}")
+        results['best_ppl'] = best_ppl
+        results['final_step'] = step
+        logger.info(f"Final: Best Perplexity = {best_ppl:.2f}")
     
-    return best_ppl
+    # Cleanup
+    del model, optimizer, scheduler
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    return results
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--optimizer', default='all')
-    parser.add_argument('--data', default='/blue/wdixon/wang.yixuan/rlo_experiments/data/wikitext')
-    parser.add_argument('--output', default='/blue/wdixon/wang.yixuan/rlo_experiments/lm')
-    parser.add_argument('--steps', type=int, default=50000)  # Reduced from 100k
+    parser.add_argument('--optimizer', type=str, default='all')
+    parser.add_argument('--data', type=str, required=True)
+    parser.add_argument('--output', type=str, required=True)
+    parser.add_argument('--steps', type=int, default=50000)
     args = parser.parse_args()
     
-    # Setup
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark = True
+    print(f"Starting LM training with args: {args}")
     
-    random.seed(42)
-    np.random.seed(42)
-    torch.manual_seed(42)
+    # Distributed setup
+    rank = int(os.environ.get('RANK', 0))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
     
-    # Distributed
-    if 'RANK' in os.environ:
-        rank = int(os.environ['RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
-        local_rank = int(os.environ['LOCAL_RANK'])
-        torch.cuda.set_device(local_rank)
+    print(f"Rank {rank}/{world_size}, local_rank={local_rank}")
+    
+    if world_size > 1:
         dist.init_process_group('nccl')
+        torch.cuda.set_device(local_rank)
+    
+    device = torch.device(f'cuda:{local_rank}')
+    print(f"Using device: {device}")
+    
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    logger = setup_logger(output_dir, rank, 'lm')
+    
+    if rank == 0:
+        logger.info(f"Data path: {args.data}")
+        logger.info(f"Output dir: {args.output}")
+        logger.info(f"Total steps: {args.steps}")
+    
+    # Optimizers to test
+    if args.optimizer == 'all':
+        optimizers = ['adamw', 'lion', 'rlo', 'rlo_lambda_a', 'smooth_lifted_rlo']
     else:
-        rank, world_size, local_rank = 0, 1, 0
+        optimizers = [args.optimizer]
     
-    output_path = Path(args.output)
-    output_path.mkdir(exist_ok=True, parents=True)
-    
-    logger = setup_logger(output_path, rank, "lm")
-    
-    # Run experiments
-    optimizers = list(CONFIGS.keys()) if args.optimizer == 'all' else [args.optimizer]
     results = {}
     
     for opt in optimizers:
         try:
-            gc.collect()
-            torch.cuda.empty_cache()
-            results[opt] = train_lm(opt, Path(args.data), output_path,
-                                   args.steps, rank, world_size, local_rank, logger)
+            results[opt] = train_lm(opt, Path(args.data), output_dir, args.steps,
+                                   rank, world_size, device, logger)
+            
+            if rank == 0:
+                with open(output_dir / f'{opt}_results.json', 'w') as f:
+                    json.dump(results[opt], f, indent=2)
+        
         except Exception as e:
-            logger.error(f"Error with {opt}: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+            if rank == 0:
+                logger.error(f"Error with {opt}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
     
     # Summary
-    if rank == 0 and results:
+    if rank == 0:
         logger.info("=" * 70)
-        logger.info("Language Model Results (Perplexity, lower is better):")
-        for opt, ppl in sorted(results.items(), key=lambda x: x[1]):
+        logger.info("LM Results (Perplexity, lower is better):")
+        for opt in sorted(results.keys(), key=lambda x: results[x].get('best_ppl', float('inf'))):
+            ppl = results[opt].get('best_ppl', float('inf'))
             logger.info(f"  {opt}: {ppl:.2f}")
     
-    if dist.is_initialized():
+    if world_size > 1:
         dist.destroy_process_group()
 
 

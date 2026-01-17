@@ -4,11 +4,13 @@
 #SBATCH --gpus=8
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=36
+#SBATCH --cpus-per-task=48
 #SBATCH --mem=280gb
 #SBATCH --time=24:00:00
 #SBATCH --output=/blue/wdixon/wang.yixuan/rlo_experiments/logs/%x-%j.out
 #SBATCH --error=/blue/wdixon/wang.yixuan/rlo_experiments/logs/%x-%j.err
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-user=williamsw2179@gmail.com
 
 set -e
 hostname; date; pwd
@@ -23,9 +25,7 @@ BASE="/blue/wdixon/wang.yixuan/rlo_experiments"
 SRC_DATA="/blue/wdixon/wang.yixuan/lypcdf/imagenet_folder"
 mkdir -p $BASE/{logs,lit}
 
-# ============================================================
-# Copy ImageNet to LOCAL NVMe
-# ============================================================
+# Copy ImageNet to local NVMe
 LOCAL_DATA="$SLURM_TMPDIR/imagenet"
 mkdir -p $LOCAL_DATA
 
@@ -42,7 +42,7 @@ cp $SLURM_SUBMIT_DIR/train_lit.py $BASE/
 cd $BASE
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export OMP_NUM_THREADS=4
+export OMP_NUM_THREADS=6
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 torchrun --nproc_per_node=8 --master_port=29510 train_lit.py \

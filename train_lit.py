@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
 LiT (Locked-image Text Tuning) Experiment - Following Lion Paper Table 4
-Records ZERO-SHOT ACCURACY on ImageNet/CIFAR-100 (not just loss!)
-
-Lion Paper Table 4 configs:
-- AdamW: lr=1e-3, wd=0.0
-- Lion: lr=3e-4 (0.3x), wd=0.0
+Uses pre-trained CLIP vision encoder (frozen), trains text encoder
+Records Zero-shot Classification Accuracy
 """
-import os, gc, time, math, random, json, logging, argparse
+import os, gc, time, math, json, logging, argparse
 from pathlib import Path
 import numpy as np
 import torch
@@ -17,12 +14,23 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
-import torchvision.transforms as T
-from torchvision.datasets import ImageFolder, CIFAR100
+from torchvision import transforms
+from torchvision.datasets import ImageFolder
 import warnings; warnings.filterwarnings('ignore')
 
-# Import optimizers
-from optimizers import Lion, RLO, RLO_LambdaA, SmoothLiftedRLO, create_optimizer
+try:
+    from transformers import CLIPModel, CLIPProcessor, CLIPTokenizer
+    HAS_TRANSFORMERS = True
+except ImportError:
+    HAS_TRANSFORMERS = False
+
+try:
+    from optimizers import create_optimizer
+except ImportError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from optimizers import create_optimizer
+
 
 def setup_logger(out, rank, name):
     logger = logging.getLogger(name)
@@ -40,7 +48,21 @@ def setup_logger(out, rank, name):
     return logger
 
 
-class MultiHeadAttention(nn.Module):
+# ============================================================================
+# Simple ViT and Text Encoder for non-CLIP fallback
+# ============================================================================
+
+class PatchEmbed(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, embed_dim=512):
+        super().__init__()
+        self.num_patches = (img_size // patch_size) ** 2
+        self.proj = nn.Conv2d(3, embed_dim, patch_size, patch_size)
+    
+    def forward(self, x):
+        return self.proj(x).flatten(2).transpose(1, 2)
+
+
+class Attention(nn.Module):
     def __init__(self, dim, num_heads=8):
         super().__init__()
         self.num_heads = num_heads
@@ -48,130 +70,90 @@ class MultiHeadAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
     
-    def forward(self, x, mask=None):
+    def forward(self, x):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
-        
-        attn = (q @ k.transpose(-2, -1)) * (self.head_dim ** -0.5)
-        if mask is not None:
-            attn = attn.masked_fill(mask == 0, float('-inf'))
-        attn = attn.softmax(dim=-1)
-        
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        return self.proj(x)
+        x = F.scaled_dot_product_attention(q, k, v)
+        return self.proj(x.transpose(1, 2).reshape(B, N, C))
 
 
-class TransformerBlock(nn.Module):
-    def __init__(self, dim, num_heads, causal=False):
+class Block(nn.Module):
+    def __init__(self, dim, num_heads):
         super().__init__()
-        self.causal = causal
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = MultiHeadAttention(dim, num_heads)
+        self.attn = Attention(dim, num_heads)
         self.norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.GELU(),
-            nn.Linear(dim * 4, dim)
-        )
+        self.mlp = nn.Sequential(nn.Linear(dim, dim * 4), nn.GELU(), nn.Linear(dim * 4, dim))
     
     def forward(self, x):
-        mask = None
-        if self.causal:
-            seq_len = x.size(1)
-            mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device))
-            mask = mask.unsqueeze(0).unsqueeze(0)
-        
-        x = x + self.attn(self.norm1(x), mask)
-        x = x + self.mlp(self.norm2(x))
-        return x
+        x = x + self.attn(self.norm1(x))
+        return x + self.mlp(self.norm2(x))
 
 
 class VisionEncoder(nn.Module):
-    """ViT-B/32 style encoder for images."""
-    def __init__(self, dim=768, depth=12, heads=12, output_dim=512, patch_size=32):
+    """Simple ViT for vision encoding."""
+    def __init__(self, embed_dim=512, depth=12, num_heads=8):
         super().__init__()
-        self.patch_embed = nn.Conv2d(3, dim, patch_size, patch_size)
-        num_patches = (224 // patch_size) ** 2  # 49 for patch_size=32
-        
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, dim))
-        
-        self.blocks = nn.ModuleList([
-            TransformerBlock(dim, heads) for _ in range(depth)
-        ])
-        
-        self.norm = nn.LayerNorm(dim)
-        self.proj = nn.Linear(dim, output_dim)
-        
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        self.patch_embed = PatchEmbed(embed_dim=embed_dim)
+        num_patches = self.patch_embed.num_patches
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        self.blocks = nn.ModuleList([Block(embed_dim, num_heads) for _ in range(depth)])
+        self.norm = nn.LayerNorm(embed_dim)
+        self.proj = nn.Linear(embed_dim, embed_dim)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
     
     def forward(self, x):
         B = x.shape[0]
-        x = self.patch_embed(x).flatten(2).transpose(1, 2)
-        
+        x = self.patch_embed(x)
         cls = self.cls_token.expand(B, -1, -1)
-        x = torch.cat([cls, x], dim=1)
-        x = x + self.pos_embed
-        
-        for block in self.blocks:
-            x = block(x)
-        
-        x = self.norm(x[:, 0])
-        return self.proj(x)
+        x = torch.cat([cls, x], dim=1) + self.pos_embed
+        for blk in self.blocks:
+            x = blk(x)
+        return self.proj(self.norm(x[:, 0]))
 
 
 class TextEncoder(nn.Module):
-    """Transformer text encoder."""
-    def __init__(self, vocab_size=49408, dim=512, depth=6, heads=8, 
-                 max_len=77, output_dim=512):
+    """Simple transformer for text encoding."""
+    def __init__(self, vocab_size=50000, embed_dim=512, depth=6, num_heads=8, max_len=77):
         super().__init__()
-        self.token_embed = nn.Embedding(vocab_size, dim)
-        self.pos_embed = nn.Embedding(max_len, dim)
-        
-        self.blocks = nn.ModuleList([
-            TransformerBlock(dim, heads, causal=True) for _ in range(depth)
-        ])
-        
-        self.norm = nn.LayerNorm(dim)
-        self.proj = nn.Linear(dim, output_dim)
+        self.token_embed = nn.Embedding(vocab_size, embed_dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_len, embed_dim))
+        self.blocks = nn.ModuleList([Block(embed_dim, num_heads) for _ in range(depth)])
+        self.norm = nn.LayerNorm(embed_dim)
+        self.proj = nn.Linear(embed_dim, embed_dim)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
     
     def forward(self, tokens):
-        B, T = tokens.shape
-        x = self.token_embed(tokens) + self.pos_embed(torch.arange(T, device=tokens.device))
-        
-        for block in self.blocks:
-            x = block(x)
-        
-        # Get features at EOT token position
-        x = self.norm(x[torch.arange(B), tokens.argmax(dim=-1)])
+        x = self.token_embed(tokens) + self.pos_embed[:, :tokens.shape[1]]
+        for blk in self.blocks:
+            x = blk(x)
+        # Use last token (EOT position) or mean pooling
+        x = self.norm(x[:, -1])
         return self.proj(x)
 
 
-class LiTModel(nn.Module):
-    """Locked-image Text tuning model."""
-    def __init__(self, embed_dim=512):
+class SimpleCLIP(nn.Module):
+    """Simple CLIP-like model."""
+    def __init__(self, embed_dim=512, freeze_vision=True):
         super().__init__()
-        self.vision_encoder = VisionEncoder(output_dim=embed_dim)
-        self.text_encoder = TextEncoder(output_dim=embed_dim)
+        self.vision_encoder = VisionEncoder(embed_dim=embed_dim)
+        self.text_encoder = TextEncoder(embed_dim=embed_dim)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         
-        # Freeze vision encoder (LiT style)
-        for param in self.vision_encoder.parameters():
-            param.requires_grad = False
+        if freeze_vision:
+            for param in self.vision_encoder.parameters():
+                param.requires_grad = False
     
     def forward(self, images, tokens):
         with torch.no_grad():
             image_features = F.normalize(self.vision_encoder(images), dim=-1)
-        
         text_features = F.normalize(self.text_encoder(tokens), dim=-1)
-        
         logit_scale = self.logit_scale.exp()
         logits_per_image = logit_scale * image_features @ text_features.t()
-        logits_per_text = logits_per_image.t()
-        
-        return logits_per_image, logits_per_text
+        return logits_per_image, logits_per_image.t()
     
     def get_image_features(self, images):
         with torch.no_grad():
@@ -181,17 +163,20 @@ class LiTModel(nn.Module):
         return F.normalize(self.text_encoder(tokens), dim=-1)
 
 
+# ============================================================================
+# Dataset
+# ============================================================================
+
 class ImageTextDataset(Dataset):
-    """Simple dataset for image-text pairs."""
-    def __init__(self, image_folder, transform=None, max_len=77):
+    """Dataset that creates image-text pairs from ImageFolder."""
+    def __init__(self, image_folder, transform=None, tokenizer=None):
         self.dataset = ImageFolder(image_folder, transform)
-        self.max_len = max_len
-        # Simple byte-level tokenization
-        self.vocab_size = 256
+        self.tokenizer = tokenizer
+        self.max_len = 77
     
-    def tokenize(self, text):
-        tokens = [ord(c) % 256 for c in text[:self.max_len - 1]]
-        # Add EOT at end
+    def simple_tokenize(self, text):
+        """Simple byte-level tokenization fallback."""
+        tokens = [ord(c) % 50000 for c in text[:self.max_len - 1]]
         tokens = tokens + [0] * (self.max_len - len(tokens))
         return torch.tensor(tokens, dtype=torch.long)
     
@@ -201,13 +186,19 @@ class ImageTextDataset(Dataset):
     def __getitem__(self, idx):
         image, label = self.dataset[idx]
         class_name = self.dataset.classes[label].replace('_', ' ')
-        text = f"a photo of {class_name}"
-        tokens = self.tokenize(text)
+        text = f"a photo of a {class_name}"
+        
+        if self.tokenizer:
+            tokens = self.tokenizer(text, max_length=self.max_len, padding='max_length',
+                                   truncation=True, return_tensors='pt')['input_ids'].squeeze(0)
+        else:
+            tokens = self.simple_tokenize(text)
+        
         return image, tokens, label
 
 
 def contrastive_loss(logits_per_image, logits_per_text):
-    """CLIP-style contrastive loss."""
+    """CLIP-style symmetric contrastive loss."""
     batch_size = logits_per_image.shape[0]
     labels = torch.arange(batch_size, device=logits_per_image.device)
     loss_i = F.cross_entropy(logits_per_image, labels)
@@ -216,32 +207,46 @@ def contrastive_loss(logits_per_image, logits_per_text):
 
 
 @torch.no_grad()
-def compute_zero_shot_accuracy(model, image_loader, class_names, device):
+def compute_zero_shot_accuracy(model, image_loader, class_names, device, tokenizer=None):
     """Compute zero-shot classification accuracy."""
     model.eval()
     
     # Create text embeddings for all classes
-    text_embeddings = []
-    for class_name in class_names:
-        text = f"a photo of {class_name.replace('_', ' ')}"
-        tokens = torch.tensor([[ord(c) % 256 for c in text[:76]] + [0] * (77 - len(text[:76]))], 
-                             dtype=torch.long, device=device)
-        text_feat = model.get_text_features(tokens)
-        text_embeddings.append(text_feat)
+    texts = [f"a photo of a {name.replace('_', ' ')}" for name in class_names]
     
-    text_embeddings = torch.cat(text_embeddings, dim=0)  # [num_classes, dim]
+    if tokenizer:
+        text_tokens = tokenizer(texts, max_length=77, padding='max_length',
+                               truncation=True, return_tensors='pt')['input_ids'].to(device)
+    else:
+        # Simple tokenization
+        text_tokens = []
+        for text in texts:
+            tokens = [ord(c) % 50000 for c in text[:76]]
+            tokens = tokens + [0] * (77 - len(tokens))
+            text_tokens.append(tokens)
+        text_tokens = torch.tensor(text_tokens, dtype=torch.long, device=device)
+    
+    # Get text features
+    if hasattr(model, 'module'):
+        text_features = model.module.get_text_features(text_tokens)
+    else:
+        text_features = model.get_text_features(text_tokens)
+    text_features = F.normalize(text_features, dim=-1)
     
     correct = 0
     total = 0
     
     for images, _, labels in image_loader:
-        images = images.to(device)
-        labels = labels.to(device)
+        images, labels = images.to(device), labels.to(device)
         
-        image_features = model.get_image_features(images)
+        if hasattr(model, 'module'):
+            image_features = model.module.get_image_features(images)
+        else:
+            image_features = model.get_image_features(images)
+        image_features = F.normalize(image_features, dim=-1)
         
         # Compute similarity
-        similarity = image_features @ text_embeddings.t()
+        similarity = image_features @ text_features.t()
         predictions = similarity.argmax(dim=-1)
         
         correct += (predictions == labels).sum().item()
@@ -250,54 +255,62 @@ def compute_zero_shot_accuracy(model, image_loader, class_names, device):
     return 100.0 * correct / total
 
 
-# ============= Lion Paper Table 4 Configs =============
-CONFIGS = {
-    'adamw': {'lr': 1e-3, 'wd': 0.0, 'betas': (0.9, 0.999)},
-    'lion': {'lr': 3e-4, 'wd': 0.0, 'betas': (0.9, 0.99)},  # 0.3x lr
-    'rlo': {'lr': 3e-4, 'wd': 0.0, 'betas': (0.9, 0.99), 'belief_coef': 0.1},
-    'rlo_lambda_a': {'lr': 3e-4, 'wd': 0.0, 'beta1': 0.9, 'beta2': 0.99, 'lambda_b': 0.1},
-    'smooth_lifted_rlo': {'lr': 3e-4, 'wd': 0.0, 'beta1': 0.9, 'beta2': 0.99, 
-                          'lambda_b': 0.1, 'eta': 0.3},
-}
-
-
-def train_lit(opt_name, data_path, output_path, epochs, rank, world_size, local_rank, logger):
-    device = torch.device(f'cuda:{local_rank}')
-    cfg = CONFIGS[opt_name]
+def train_lit(optimizer_name, data_path, output_dir, epochs, rank, world_size, device, logger):
+    """Train LiT model with specified optimizer."""
     
-    batch_size = 256
-    per_gpu_batch = batch_size // world_size
+    # Hyperparameters from Lion paper Table 4
+    configs = {
+        'adamw': {'lr': 1e-3, 'wd': 0.0, 'betas': (0.9, 0.99)},
+        'lion': {'lr': 3e-4, 'wd': 0.0, 'betas': (0.9, 0.99)},  # 0.3x lr
+        'rlo': {'lr': 3e-4, 'wd': 0.0},
+        'rlo_lambda_a': {'lr': 3e-4, 'wd': 0.0},
+        'smooth_lifted_rlo': {'lr': 3e-4, 'wd': 0.0},
+    }
     
-    logger.info("=" * 70)
-    logger.info(f"LiT Training: {opt_name}")
-    logger.info(f"LR={cfg['lr']}, WD={cfg['wd']}")
-    logger.info("=" * 70)
+    cfg = configs.get(optimizer_name, configs['adamw'])
     
-    # Data transforms
-    train_transform = T.Compose([
-        T.Resize(224),
-        T.CenterCrop(224),
-        T.RandomHorizontalFlip(),
-        T.ToTensor(),
-        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+    if rank == 0:
+        logger.info("=" * 70)
+        logger.info(f"LiT Training: {optimizer_name}")
+        logger.info(f"LR={cfg['lr']}, WD={cfg['wd']}")
+        logger.info("=" * 70)
+    
+    # Data
+    transform = transforms.Compose([
+        transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
     
-    val_transform = T.Compose([
-        T.Resize(224),
-        T.CenterCrop(224),
-        T.ToTensor(),
-        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+    val_transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
     
-    # Datasets
-    train_dataset = ImageTextDataset(data_path / 'train', train_transform)
-    val_dataset = ImageTextDataset(data_path / 'val' if (data_path / 'val').exists() 
-                                   else data_path / 'train', val_transform)
+    train_path = data_path / 'train' if (data_path / 'train').exists() else data_path
+    val_path = data_path / 'val' if (data_path / 'val').exists() else train_path
+    
+    # Try to use HuggingFace CLIP tokenizer
+    tokenizer = None
+    if HAS_TRANSFORMERS:
+        try:
+            tokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-base-patch16')
+        except Exception as e:
+            if rank == 0:
+                logger.warning(f"Could not load CLIP tokenizer: {e}")
+    
+    train_dataset = ImageTextDataset(train_path, transform, tokenizer)
+    val_dataset = ImageTextDataset(val_path, val_transform, tokenizer)
+    
+    per_gpu_batch = 128
     
     train_sampler = DistributedSampler(train_dataset, world_size, rank) if world_size > 1 else None
-    train_loader = DataLoader(train_dataset, per_gpu_batch, 
+    train_loader = DataLoader(train_dataset, per_gpu_batch,
                              shuffle=(train_sampler is None),
-                             sampler=train_sampler, 
+                             sampler=train_sampler,
                              num_workers=12, pin_memory=True, drop_last=True,
                              persistent_workers=True, prefetch_factor=4)
     
@@ -306,168 +319,200 @@ def train_lit(opt_name, data_path, output_path, epochs, rank, world_size, local_
                            prefetch_factor=4)
     
     class_names = train_dataset.dataset.classes
-    logger.info(f"Classes: {len(class_names)}, Train samples: {len(train_dataset)}")
     
-    # Model
-    model = LiTModel(embed_dim=512).to(device)
+    if rank == 0:
+        logger.info(f"Classes: {len(class_names)}, Train samples: {len(train_dataset)}")
+    
+    # Model - use pre-trained CLIP if available
+    if HAS_TRANSFORMERS:
+        try:
+            clip_model = CLIPModel.from_pretrained('openai/clip-vit-base-patch16').to(device)
+            # Freeze vision encoder (LiT style)
+            for param in clip_model.vision_model.parameters():
+                param.requires_grad = False
+            model = clip_model
+            use_clip = True
+            if rank == 0:
+                logger.info("Using pre-trained CLIP model")
+        except Exception as e:
+            if rank == 0:
+                logger.warning(f"Could not load CLIP: {e}, using SimpleCLIP")
+            model = SimpleCLIP(freeze_vision=True).to(device)
+            use_clip = False
+    else:
+        model = SimpleCLIP(freeze_vision=True).to(device)
+        use_clip = False
+        if rank == 0:
+            logger.info("Using SimpleCLIP (transformers not available)")
+    
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
     
+    # Count trainable params
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Trainable params: {trainable_params / 1e6:.1f}M")
+    if rank == 0:
+        logger.info(f"Trainable params: {trainable_params/1e6:.1f}M")
     
-    # Optimizer
-    base_model = model.module if hasattr(model, 'module') else model
-    optimizer = create_optimizer(base_model.text_encoder, opt_name, cfg)
-    
-    scaler = torch.amp.GradScaler('cuda')
-    
-    # LR schedule
-    total_steps = len(train_loader) * epochs
-    warmup_steps = len(train_loader) * 2
-    
-    def get_lr(step):
-        if step < warmup_steps:
-            return cfg['lr'] * step / max(1, warmup_steps)
-        else:
-            progress = (step - warmup_steps) / (total_steps - warmup_steps)
-            return cfg['lr'] * 0.5 * (1 + math.cos(math.pi * progress))
+    # Optimizer - only optimize trainable parameters
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    optimizer = create_optimizer(optimizer_name, trainable,
+                                lr=cfg['lr'], weight_decay=cfg['wd'],
+                                betas=cfg.get('betas'))
     
     # Training
-    history = {'loss': [], 'acc_imagenet': [], 'step': []}
-    best_acc = 0.0
-    global_step = 0
+    best_acc = 0
+    results = {'optimizer': optimizer_name, 'history': []}
+    scaler = torch.amp.GradScaler()
     
-    for epoch in range(epochs):
+    for epoch in range(1, epochs + 1):
+        model.train()
         if train_sampler:
             train_sampler.set_epoch(epoch)
         
-        model.train()
-        epoch_loss = 0.0
-        t0 = time.time()
+        total_loss = 0
+        num_batches = 0
         
         for images, tokens, _ in train_loader:
-            images = images.to(device)
-            tokens = tokens.to(device)
+            images, tokens = images.to(device), tokens.to(device)
             
-            # Update LR
-            lr = get_lr(global_step)
-            for g in optimizer.param_groups:
-                g['lr'] = lr
+            optimizer.zero_grad()
             
-            optimizer.zero_grad(set_to_none=True)
-            
-            with torch.autocast('cuda', torch.bfloat16):
-                logits_i, logits_t = model(images, tokens)
-                loss = contrastive_loss(logits_i, logits_t)
+            with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+                if use_clip:
+                    outputs = model(pixel_values=images, input_ids=tokens)
+                    logits_per_image = outputs.logits_per_image
+                    logits_per_text = outputs.logits_per_text
+                else:
+                    logits_per_image, logits_per_text = model(images, tokens)
+                
+                loss = contrastive_loss(logits_per_image, logits_per_text)
             
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             scaler.step(optimizer)
             scaler.update()
             
-            epoch_loss += loss.item()
-            global_step += 1
+            total_loss += loss.item()
+            num_batches += 1
         
-        avg_loss = epoch_loss / len(train_loader)
+        avg_loss = total_loss / num_batches
         
-        # Evaluate zero-shot accuracy every 5 epochs
-        acc = 0.0
-        if (epoch + 1) % 5 == 0 or epoch == epochs - 1:
-            base_model = model.module if hasattr(model, 'module') else model
-            acc = compute_zero_shot_accuracy(base_model, val_loader, class_names, device)
+        # Evaluate every 5 epochs
+        if rank == 0 and (epoch % 5 == 0 or epoch == epochs):
+            # Custom zero-shot evaluation
+            model.eval()
             
-            is_best = acc > best_acc
-            best_acc = max(acc, best_acc)
+            if use_clip:
+                # Use CLIP's built-in methods
+                raw_model = model.module if hasattr(model, 'module') else model
+                
+                # Create class text embeddings
+                texts = [f"a photo of a {name.replace('_', ' ')}" for name in class_names]
+                text_inputs = tokenizer(texts, max_length=77, padding='max_length',
+                                       truncation=True, return_tensors='pt').to(device)
+                
+                with torch.no_grad():
+                    text_features = raw_model.get_text_features(**text_inputs)
+                    text_features = F.normalize(text_features, dim=-1)
+                
+                correct = 0
+                total = 0
+                
+                for images, _, labels in val_loader:
+                    images, labels = images.to(device), labels.to(device)
+                    
+                    with torch.no_grad():
+                        image_features = raw_model.get_image_features(pixel_values=images)
+                        image_features = F.normalize(image_features, dim=-1)
+                    
+                    similarity = image_features @ text_features.t()
+                    predictions = similarity.argmax(dim=-1)
+                    correct += (predictions == labels).sum().item()
+                    total += labels.size(0)
+                
+                acc = 100.0 * correct / total
+            else:
+                acc = compute_zero_shot_accuracy(model, val_loader, class_names, device, tokenizer)
             
-            history['loss'].append(avg_loss)
-            history['acc_imagenet'].append(acc)
-            history['step'].append(global_step)
+            results['history'].append({'epoch': epoch, 'loss': avg_loss, 'acc': acc})
             
-            logger.info(f"E{epoch+1:3d}: loss={avg_loss:.4f} acc={acc:.2f}%{'*' if is_best else ''} "
-                       f"time={time.time()-t0:.0f}s")
-            
-            if is_best and rank == 0:
-                torch.save({
-                    'model': base_model.state_dict(),
-                    'acc': best_acc,
-                    'epoch': epoch
-                }, output_path / f"lit_{opt_name}_best.pt")
-        else:
-            logger.info(f"E{epoch+1:3d}: loss={avg_loss:.4f} time={time.time()-t0:.0f}s")
+            if acc > best_acc:
+                best_acc = acc
+                logger.info(f"E{epoch:3d}: loss={avg_loss:.4f} acc={acc:.2f}%*")
+            else:
+                logger.info(f"E{epoch:3d}: loss={avg_loss:.4f} acc={acc:.2f}%")
+        elif rank == 0:
+            logger.info(f"E{epoch:3d}: loss={avg_loss:.4f}")
     
-    # Save final results
     if rank == 0:
-        results = {
-            'optimizer': opt_name,
-            'config': cfg,
-            'best_acc': best_acc,
-            'history': history
-        }
-        with open(output_path / f"lit_{opt_name}_results.json", 'w') as f:
-            json.dump(results, f, indent=2)
-        
+        results['best_acc'] = best_acc
         logger.info(f"Final: Best Acc = {best_acc:.2f}%")
     
-    return best_acc
+    # Cleanup
+    del model, optimizer
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    return results
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--optimizer', default='all')
-    parser.add_argument('--data', default='/blue/wdixon/wang.yixuan/lypcdf/imagenet_folder')
-    parser.add_argument('--output', default='/blue/wdixon/wang.yixuan/rlo_experiments/lit')
+    parser.add_argument('--optimizer', type=str, default='all')
+    parser.add_argument('--data', type=str, required=True)
+    parser.add_argument('--output', type=str, required=True)
     parser.add_argument('--epochs', type=int, default=30)
     args = parser.parse_args()
     
-    # Setup
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark = True
-    
-    random.seed(42)
-    np.random.seed(42)
-    torch.manual_seed(42)
-    
     # Distributed setup
-    if 'RANK' in os.environ:
-        rank = int(os.environ['RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
-        local_rank = int(os.environ['LOCAL_RANK'])
-        torch.cuda.set_device(local_rank)
+    rank = int(os.environ.get('RANK', 0))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    
+    if world_size > 1:
         dist.init_process_group('nccl')
+        torch.cuda.set_device(local_rank)
+    
+    device = torch.device(f'cuda:{local_rank}')
+    
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    logger = setup_logger(output_dir, rank, 'lit')
+    
+    # Optimizers to test
+    if args.optimizer == 'all':
+        optimizers = ['adamw', 'lion', 'rlo', 'rlo_lambda_a', 'smooth_lifted_rlo']
     else:
-        rank, world_size, local_rank = 0, 1, 0
+        optimizers = [args.optimizer]
     
-    output_path = Path(args.output)
-    output_path.mkdir(exist_ok=True, parents=True)
-    
-    logger = setup_logger(output_path, rank, "lit")
-    
-    # Run experiments
-    optimizers = list(CONFIGS.keys()) if args.optimizer == 'all' else [args.optimizer]
     results = {}
     
     for opt in optimizers:
         try:
-            gc.collect()
-            torch.cuda.empty_cache()
-            results[opt] = train_lit(opt, Path(args.data), output_path, 
-                                    args.epochs, rank, world_size, local_rank, logger)
+            results[opt] = train_lit(opt, Path(args.data), output_dir, args.epochs,
+                                    rank, world_size, device, logger)
+            
+            if rank == 0:
+                with open(output_dir / f'{opt}_results.json', 'w') as f:
+                    json.dump(results[opt], f, indent=2)
+        
         except Exception as e:
-            logger.error(f"Error with {opt}: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+            if rank == 0:
+                logger.error(f"Error with {opt}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
     
     # Summary
-    if rank == 0 and results:
+    if rank == 0:
         logger.info("=" * 70)
         logger.info("LiT Results (Zero-Shot Accuracy %):")
-        for opt, acc in sorted(results.items(), key=lambda x: x[1], reverse=True):
+        for opt in sorted(results.keys(), key=lambda x: -results[x].get('best_acc', 0)):
+            acc = results[opt].get('best_acc', 0)
             logger.info(f"  {opt}: {acc:.2f}%")
     
-    if dist.is_initialized():
+    if world_size > 1:
         dist.destroy_process_group()
 
 

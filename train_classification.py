@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-Image Classification: ViT-S/16 on ImageNet - Following Lion Paper Table 2
-90 epochs, records TOP-1 ACCURACY
-
-Lion Paper Table 2 configs (ViT-S/16 RandAug):
-- AdamW: lr=3e-3, wd=0.1, β=(0.9, 0.999)
-- Lion: lr=3e-4 (0.1x), wd=1.0 (10x), β=(0.9, 0.99)
+Image Classification Experiment - Following Lion Paper Table 2
+ViT-S/16 or ViT-B/16 on ImageNet, 90 epochs
+Records Top-1 Accuracy
 """
-import os, gc, time, math, random, json, logging, argparse
+import os, gc, time, math, json, logging, argparse
 from pathlib import Path
 import numpy as np
 import torch
@@ -17,12 +14,16 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.utils.checkpoint import checkpoint
-import torchvision.transforms as T
+from torchvision import transforms
 from torchvision.datasets import ImageFolder
 import warnings; warnings.filterwarnings('ignore')
 
-from optimizers import Lion, RLO, RLO_LambdaA, SmoothLiftedRLO, create_optimizer
+try:
+    from optimizers import create_optimizer
+except ImportError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from optimizers import create_optimizer
 
 
 def setup_logger(out, rank, name):
@@ -41,12 +42,23 @@ def setup_logger(out, rank, name):
     return logger
 
 
-class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, num_heads=6):
+class PatchEmbed(nn.Module):
+    """Image to Patch Embedding."""
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
+        super().__init__()
+        self.num_patches = (img_size // patch_size) ** 2
+        self.proj = nn.Conv2d(in_chans, embed_dim, patch_size, patch_size)
+    
+    def forward(self, x):
+        return self.proj(x).flatten(2).transpose(1, 2)
+
+
+class Attention(nn.Module):
+    """Multi-head self-attention."""
+    def __init__(self, dim, num_heads=8):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
         self.qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
     
@@ -54,25 +66,31 @@ class MultiHeadAttention(nn.Module):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
-        
-        # Use flash attention if available
         x = F.scaled_dot_product_attention(q, k, v)
         x = x.transpose(1, 2).reshape(B, N, C)
         return self.proj(x)
 
 
-class TransformerBlock(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio=4.0):
+class MLP(nn.Module):
+    """MLP block."""
+    def __init__(self, dim, mlp_ratio=4.0):
+        super().__init__()
+        hidden = int(dim * mlp_ratio)
+        self.fc1 = nn.Linear(dim, hidden)
+        self.fc2 = nn.Linear(hidden, dim)
+    
+    def forward(self, x):
+        return self.fc2(F.gelu(self.fc1(x)))
+
+
+class Block(nn.Module):
+    """Transformer block."""
+    def __init__(self, dim, num_heads):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = MultiHeadAttention(dim, num_heads)
+        self.attn = Attention(dim, num_heads)
         self.norm2 = nn.LayerNorm(dim)
-        mlp_dim = int(dim * mlp_ratio)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, mlp_dim),
-            nn.GELU(),
-            nn.Linear(mlp_dim, dim)
-        )
+        self.mlp = MLP(dim)
     
     def forward(self, x):
         x = x + self.attn(self.norm1(x))
@@ -81,181 +99,123 @@ class TransformerBlock(nn.Module):
 
 
 class ViT(nn.Module):
-    """Vision Transformer - ViT-S/16 configuration."""
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000,
-                 embed_dim=384, depth=12, num_heads=6, use_checkpoint=True):
+    """Vision Transformer for classification."""
+    def __init__(self, img_size=224, patch_size=16, num_classes=1000,
+                 embed_dim=384, depth=12, num_heads=6, use_checkpoint=False):
         super().__init__()
         self.use_checkpoint = use_checkpoint
         
-        num_patches = (img_size // patch_size) ** 2
+        self.patch_embed = PatchEmbed(img_size, patch_size, 3, embed_dim)
+        num_patches = self.patch_embed.num_patches
         
-        self.patch_embed = nn.Conv2d(in_chans, embed_dim, patch_size, patch_size)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         
-        self.blocks = nn.ModuleList([
-            TransformerBlock(embed_dim, num_heads) for _ in range(depth)
-        ])
-        
+        self.blocks = nn.ModuleList([Block(embed_dim, num_heads) for _ in range(depth)])
         self.norm = nn.LayerNorm(embed_dim)
         self.head = nn.Linear(embed_dim, num_classes)
         
-        # Initialize
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        self.apply(self._init_weights)
-    
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            nn.init.trunc_normal_(m.weight, std=0.02)
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.ones_(m.weight)
-            nn.init.zeros_(m.bias)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
     
     def forward(self, x):
         B = x.shape[0]
-        x = self.patch_embed(x).flatten(2).transpose(1, 2)
+        x = self.patch_embed(x)
         
-        cls = self.cls_token.expand(B, -1, -1)
-        x = torch.cat([cls, x], dim=1)
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls_tokens, x], dim=1)
         x = x + self.pos_embed
         
-        for block in self.blocks:
-            if self.training and self.use_checkpoint:
-                x = checkpoint(block, x, use_reentrant=False)
+        for blk in self.blocks:
+            if self.use_checkpoint and self.training:
+                x = torch.utils.checkpoint.checkpoint(blk, x, use_reentrant=False)
             else:
-                x = block(x)
+                x = blk(x)
         
-        x = self.norm(x[:, 0])
-        return self.head(x)
+        x = self.norm(x)
+        return self.head(x[:, 0])
 
 
-class Mixup:
-    """Mixup and Cutmix data augmentation."""
-    def __init__(self, mixup_alpha=0.8, cutmix_alpha=1.0, num_classes=1000):
-        self.mixup_alpha = mixup_alpha
-        self.cutmix_alpha = cutmix_alpha
-        self.num_classes = num_classes
-    
-    def __call__(self, x, y):
-        if random.random() < 0.5 and self.mixup_alpha > 0:
-            lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
-        elif self.cutmix_alpha > 0:
-            lam = np.random.beta(self.cutmix_alpha, self.cutmix_alpha)
-        else:
-            return x, F.one_hot(y, self.num_classes).float()
-        
-        batch_size = x.size(0)
-        index = torch.randperm(batch_size, device=x.device)
-        
-        # Mixup
-        x = lam * x + (1 - lam) * x[index]
-        
-        # Soft labels
-        y_onehot = F.one_hot(y, self.num_classes).float()
-        y_mixed = lam * y_onehot + (1 - lam) * y_onehot[index]
-        
-        return x, y_mixed
-
-
-class RandAugment:
-    """Simple RandAugment implementation."""
-    def __init__(self, n=2, m=9):
-        self.n = n
-        self.m = m
-    
-    def __call__(self, img):
-        ops = [
-            T.functional.autocontrast,
-            T.functional.equalize,
-            lambda x: T.functional.rotate(x, self.m * 3),
-            lambda x: T.functional.adjust_sharpness(x, 1 + self.m / 10),
-            lambda x: T.functional.adjust_brightness(x, 1 + self.m / 30),
-            lambda x: T.functional.adjust_contrast(x, 1 + self.m / 30),
-        ]
-        
-        for _ in range(self.n):
-            op = random.choice(ops)
-            img = op(img)
-        
-        return img
+def create_vit(model_name='vit_s16', num_classes=1000, use_checkpoint=True):
+    """Create ViT model by name."""
+    configs = {
+        'vit_s16': {'embed_dim': 384, 'depth': 12, 'num_heads': 6},
+        'vit_b16': {'embed_dim': 768, 'depth': 12, 'num_heads': 12},
+    }
+    cfg = configs.get(model_name, configs['vit_s16'])
+    return ViT(num_classes=num_classes, use_checkpoint=use_checkpoint, **cfg)
 
 
 @torch.no_grad()
 def evaluate(model, loader, device):
-    """Compute top-1 accuracy."""
+    """Evaluate model accuracy."""
     model.eval()
     correct = 0
     total = 0
     
     for images, labels in loader:
-        images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-        
-        with torch.autocast('cuda', torch.bfloat16):
+        images, labels = images.to(device), labels.to(device)
+        with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
             outputs = model(images)
-        
-        predictions = outputs.argmax(dim=-1)
-        correct += (predictions == labels).sum().item()
+        _, predicted = outputs.max(1)
         total += labels.size(0)
+        correct += predicted.eq(labels).sum().item()
     
     return 100.0 * correct / total
 
 
-# ============= Lion Paper Table 2 Configs (ViT-S/16 RandAug) =============
-CONFIGS = {
-    'adamw': {'lr': 3e-3, 'wd': 0.1, 'betas': (0.9, 0.999)},
-    'lion': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},  # 0.1x lr, 10x wd
-    'rlo': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.9, 0.99), 'belief_coef': 0.1},
-    'rlo_lambda_a': {'lr': 3e-4, 'wd': 1.0, 'beta1': 0.9, 'beta2': 0.99, 'lambda_b': 0.1},
-    'smooth_lifted_rlo': {'lr': 3e-4, 'wd': 1.0, 'beta1': 0.9, 'beta2': 0.99, 
-                          'lambda_b': 0.1, 'eta': 0.3},
-}
-
-
-def train_classification(opt_name, data_path, output_path, epochs, 
-                        rank, world_size, local_rank, logger):
-    device = torch.device(f'cuda:{local_rank}')
-    cfg = CONFIGS[opt_name]
+def train_classification(optimizer_name, model_name, data_path, output_dir, epochs, 
+                        rank, world_size, device, logger):
+    """Train classification model with specified optimizer."""
     
-    # Batch size: 1024 global, scaled per GPU
-    global_batch = 1024
-    per_gpu_batch = global_batch // world_size
+    # Hyperparameters from Lion paper Table 2
+    configs = {
+        'adamw': {'lr': 3e-3, 'wd': 0.1, 'betas': (0.9, 0.99)},
+        'lion': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},  # 0.1x lr, 10x wd
+        'rlo': {'lr': 3e-4, 'wd': 1.0},
+        'rlo_lambda_a': {'lr': 3e-4, 'wd': 1.0},
+        'smooth_lifted_rlo': {'lr': 3e-4, 'wd': 1.0},
+    }
     
-    # Gradient accumulation if needed to avoid OOM
-    micro_batch = min(per_gpu_batch, 64)  # Max 64 per step to avoid OOM
-    accumulation_steps = per_gpu_batch // micro_batch
+    cfg = configs.get(optimizer_name, configs['adamw'])
     
-    logger.info("=" * 70)
-    logger.info(f"Classification: ViT-S/16 on ImageNet | {opt_name}")
-    logger.info(f"LR={cfg['lr']}, WD={cfg['wd']}, Epochs={epochs}")
-    logger.info(f"Global batch={global_batch}, Per-GPU={per_gpu_batch}, "
-               f"Micro={micro_batch}, Accum={accumulation_steps}")
-    logger.info("=" * 70)
+    if rank == 0:
+        logger.info("=" * 70)
+        logger.info(f"Classification {model_name} | {optimizer_name}")
+        logger.info(f"LR={cfg['lr']}, WD={cfg['wd']}")
+        logger.info("=" * 70)
     
-    # Data transforms with RandAugment
-    train_transform = T.Compose([
-        T.RandomResizedCrop(224, scale=(0.08, 1.0)),
-        T.RandomHorizontalFlip(),
-        T.TrivialAugmentWide(),  # Built-in augmentation
-        T.ToTensor(),
-        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-        T.RandomErasing(p=0.25),
+    # Data augmentation (following Lion paper)
+    train_transform = transforms.Compose([
+        transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.TrivialAugmentWide(),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
     
-    val_transform = T.Compose([
-        T.Resize(256),
-        T.CenterCrop(224),
-        T.ToTensor(),
-        T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+    val_transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
     
-    # Datasets
-    train_dataset = ImageFolder(data_path / 'train', train_transform)
-    val_dataset = ImageFolder(data_path / 'val' if (data_path / 'val').exists() 
-                              else data_path / 'train', val_transform)
+    train_path = data_path / 'train'
+    val_path = data_path / 'val'
+    
+    if not train_path.exists():
+        train_path = data_path
+    if not val_path.exists():
+        val_path = data_path
+    
+    train_dataset = ImageFolder(train_path, train_transform)
+    val_dataset = ImageFolder(val_path, val_transform)
+    
+    # Batch size: 4096 total, micro-batch 64 per GPU
+    total_batch = 4096
+    micro_batch = 64
+    accum_steps = total_batch // (micro_batch * world_size)
     
     train_sampler = DistributedSampler(train_dataset, world_size, rank) if world_size > 1 else None
     train_loader = DataLoader(train_dataset, micro_batch,
@@ -268,186 +228,157 @@ def train_classification(opt_name, data_path, output_path, epochs,
                            shuffle=False, num_workers=8, pin_memory=True,
                            prefetch_factor=4)
     
-    logger.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+    if rank == 0:
+        logger.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
     
     # Model
-    model = ViT(num_classes=1000, use_checkpoint=True).to(device)
-    if world_size > 1:
-        model = DDP(model, device_ids=[local_rank])
+    model = create_vit(model_name, num_classes=1000, use_checkpoint=True).to(device)
     
-    num_params = sum(p.numel() for p in model.parameters()) / 1e6
-    logger.info(f"Parameters: {num_params:.1f}M")
+    if world_size > 1:
+        model = DDP(model, device_ids=[rank])
+    
+    if rank == 0:
+        params = sum(p.numel() for p in model.parameters()) / 1e6
+        logger.info(f"Parameters: {params:.1f}M")
     
     # Optimizer
-    base_model = model.module if hasattr(model, 'module') else model
-    optimizer = create_optimizer(base_model, opt_name, cfg)
+    optimizer = create_optimizer(optimizer_name, model.parameters(),
+                                lr=cfg['lr'], weight_decay=cfg['wd'],
+                                betas=cfg.get('betas'))
     
-    scaler = torch.amp.GradScaler('cuda')
+    # LR scheduler: cosine with warmup
+    warmup_epochs = 5
+    total_steps = epochs * len(train_loader) // accum_steps
+    warmup_steps = warmup_epochs * len(train_loader) // accum_steps
     
-    # Mixup
-    mixup = Mixup(num_classes=1000)
-    
-    # LR schedule
-    steps_per_epoch = len(train_loader) // accumulation_steps
-    total_steps = steps_per_epoch * epochs
-    warmup_steps = steps_per_epoch * 10  # 10 epoch warmup
-    
-    def get_lr(step):
+    def lr_lambda(step):
         if step < warmup_steps:
-            return cfg['lr'] * step / max(1, warmup_steps)
-        else:
-            progress = (step - warmup_steps) / (total_steps - warmup_steps)
-            return cfg['lr'] * 0.5 * (1 + math.cos(math.pi * progress))
+            return step / warmup_steps
+        progress = (step - warmup_steps) / (total_steps - warmup_steps)
+        return 0.5 * (1 + math.cos(math.pi * progress))
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     # Training
-    history = {'loss': [], 'acc': [], 'epoch': []}
-    best_acc = 0.0
+    scaler = torch.amp.GradScaler()
+    best_acc = 0
+    results = {'optimizer': optimizer_name, 'model': model_name, 'history': []}
     global_step = 0
     
-    for epoch in range(epochs):
+    for epoch in range(1, epochs + 1):
+        model.train()
         if train_sampler:
             train_sampler.set_epoch(epoch)
         
-        model.train()
-        epoch_loss = 0.0
+        total_loss = 0
         num_batches = 0
-        t0 = time.time()
-        
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad()
         
         for batch_idx, (images, labels) in enumerate(train_loader):
-            images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+            images, labels = images.to(device), labels.to(device)
             
-            # Mixup
-            images, soft_labels = mixup(images, labels)
-            
-            # Update LR
-            step_in_epoch = batch_idx // accumulation_steps
-            current_step = epoch * steps_per_epoch + step_in_epoch
-            lr = get_lr(current_step)
-            for g in optimizer.param_groups:
-                g['lr'] = lr
-            
-            # Forward + backward
-            with torch.autocast('cuda', torch.bfloat16):
+            with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
                 outputs = model(images)
-                loss = -(F.log_softmax(outputs, dim=-1) * soft_labels).sum(dim=-1).mean()
-                loss = loss / accumulation_steps
+                loss = F.cross_entropy(outputs, labels) / accum_steps
             
             scaler.scale(loss).backward()
-            epoch_loss += loss.item() * accumulation_steps
+            total_loss += loss.item() * accum_steps
+            num_batches += 1
             
-            # Step optimizer
-            if (batch_idx + 1) % accumulation_steps == 0:
+            if (batch_idx + 1) % accum_steps == 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 scaler.step(optimizer)
                 scaler.update()
-                optimizer.zero_grad(set_to_none=True)
+                scheduler.step()
+                optimizer.zero_grad()
                 global_step += 1
-            
-            num_batches += 1
         
-        avg_loss = epoch_loss / num_batches
+        avg_loss = total_loss / num_batches
         
         # Evaluate every 10 epochs
-        acc = 0.0
-        if (epoch + 1) % 10 == 0 or epoch == epochs - 1:
-            base_model = model.module if hasattr(model, 'module') else model
-            acc = evaluate(base_model, val_loader, device)
+        if rank == 0 and (epoch % 10 == 0 or epoch == epochs):
+            acc = evaluate(model, val_loader, device)
+            results['history'].append({'epoch': epoch, 'loss': avg_loss, 'acc': acc})
             
-            is_best = acc > best_acc
-            best_acc = max(acc, best_acc)
-            
-            history['loss'].append(avg_loss)
-            history['acc'].append(acc)
-            history['epoch'].append(epoch + 1)
-            
-            logger.info(f"E{epoch+1:3d}: loss={avg_loss:.4f} acc={acc:.2f}%{'*' if is_best else ''} "
-                       f"lr={lr:.2e} time={time.time()-t0:.0f}s")
-            
-            if is_best and rank == 0:
-                torch.save({
-                    'model': base_model.state_dict(),
-                    'acc': best_acc,
-                    'epoch': epoch
-                }, output_path / f"vit_s16_{opt_name}_best.pt")
-        else:
-            logger.info(f"E{epoch+1:3d}: loss={avg_loss:.4f} lr={lr:.2e} time={time.time()-t0:.0f}s")
+            if acc > best_acc:
+                best_acc = acc
+                logger.info(f"E{epoch:3d}: loss={avg_loss:.4f} acc={acc:.2f}%*")
+            else:
+                logger.info(f"E{epoch:3d}: loss={avg_loss:.4f} acc={acc:.2f}%")
+        elif rank == 0 and epoch % 5 == 0:
+            logger.info(f"E{epoch:3d}: loss={avg_loss:.4f}")
     
-    # Save results
     if rank == 0:
-        results = {
-            'optimizer': opt_name,
-            'config': cfg,
-            'best_acc': best_acc,
-            'history': history
-        }
-        with open(output_path / f"vit_s16_{opt_name}_results.json", 'w') as f:
-            json.dump(results, f, indent=2)
-        
+        results['best_acc'] = best_acc
         logger.info(f"Final: Best Acc = {best_acc:.2f}%")
     
-    return best_acc
+    # Cleanup
+    del model, optimizer, scheduler
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    return results
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--optimizer', default='all')
-    parser.add_argument('--data', default='/blue/wdixon/wang.yixuan/lypcdf/imagenet_folder')
-    parser.add_argument('--output', default='/blue/wdixon/wang.yixuan/rlo_experiments/classification')
+    parser.add_argument('--optimizer', type=str, default='all')
+    parser.add_argument('--model', type=str, default='vit_s16', choices=['vit_s16', 'vit_b16'])
+    parser.add_argument('--data', type=str, required=True)
+    parser.add_argument('--output', type=str, required=True)
     parser.add_argument('--epochs', type=int, default=90)
     args = parser.parse_args()
     
-    # Setup
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark = True
+    # Distributed setup
+    rank = int(os.environ.get('RANK', 0))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
     
-    random.seed(42)
-    np.random.seed(42)
-    torch.manual_seed(42)
-    
-    # Distributed
-    if 'RANK' in os.environ:
-        rank = int(os.environ['RANK'])
-        world_size = int(os.environ['WORLD_SIZE'])
-        local_rank = int(os.environ['LOCAL_RANK'])
-        torch.cuda.set_device(local_rank)
+    if world_size > 1:
         dist.init_process_group('nccl')
+        torch.cuda.set_device(local_rank)
+    
+    device = torch.device(f'cuda:{local_rank}')
+    
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    logger = setup_logger(output_dir, rank, f'cls_{args.model}')
+    
+    # Optimizers to test
+    if args.optimizer == 'all':
+        optimizers = ['adamw', 'lion', 'rlo', 'rlo_lambda_a', 'smooth_lifted_rlo']
     else:
-        rank, world_size, local_rank = 0, 1, 0
+        optimizers = [args.optimizer]
     
-    output_path = Path(args.output)
-    output_path.mkdir(exist_ok=True, parents=True)
-    
-    logger = setup_logger(output_path, rank, "classification")
-    
-    # Run experiments
-    optimizers = list(CONFIGS.keys()) if args.optimizer == 'all' else [args.optimizer]
     results = {}
     
     for opt in optimizers:
         try:
-            gc.collect()
-            torch.cuda.empty_cache()
-            results[opt] = train_classification(opt, Path(args.data), output_path,
-                                               args.epochs, rank, world_size, 
-                                               local_rank, logger)
+            results[opt] = train_classification(opt, args.model, Path(args.data),
+                                               output_dir, args.epochs, rank, world_size,
+                                               device, logger)
+            
+            if rank == 0:
+                with open(output_dir / f'{opt}_{args.model}_results.json', 'w') as f:
+                    json.dump(results[opt], f, indent=2)
+        
         except Exception as e:
-            logger.error(f"Error with {opt}: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+            if rank == 0:
+                logger.error(f"Error with {opt}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
     
     # Summary
-    if rank == 0 and results:
+    if rank == 0:
         logger.info("=" * 70)
-        logger.info("Classification Results (Top-1 Accuracy %):")
-        for opt, acc in sorted(results.items(), key=lambda x: x[1], reverse=True):
+        logger.info(f"Classification Results ({args.model}, Top-1 Accuracy %):")
+        for opt in sorted(results.keys(), key=lambda x: -results[x].get('best_acc', 0)):
+            acc = results[opt].get('best_acc', 0)
             logger.info(f"  {opt}: {acc:.2f}%")
     
-    if dist.is_initialized():
+    if world_size > 1:
         dist.destroy_process_group()
 
 
