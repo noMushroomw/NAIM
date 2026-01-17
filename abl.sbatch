@@ -4,7 +4,7 @@
 #SBATCH --gpus=8
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=48
+#SBATCH --cpus-per-task=36
 #SBATCH --mem=128gb
 #SBATCH --time=12:00:00
 #SBATCH --output=/blue/wdixon/wang.yixuan/rlo_experiments/logs/%x-%j.out

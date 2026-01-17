@@ -4,9 +4,9 @@
 #SBATCH --gpus=8
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=48
+#SBATCH --cpus-per-task=36
 #SBATCH --mem=280gb
-#SBATCH --time=48:00:00
+#SBATCH --time=144:00:00
 #SBATCH --output=/blue/wdixon/wang.yixuan/rlo_experiments/logs/%x-%j.out
 #SBATCH --error=/blue/wdixon/wang.yixuan/rlo_experiments/logs/%x-%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
