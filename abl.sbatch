@@ -33,12 +33,6 @@ export OMP_NUM_THREADS=6
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Run ONLY LR and Batch Size studies (the remaining ones)
-# Study 1: Learning Rate Sensitivity
-torchrun --nproc_per_node=8 --master_port=29540 train_ablation.py \
-    --study lr \
-    --data $SLURM_TMPDIR/cifar \
-    --output $BASE/ablation
-
 # Study 2: Batch Size Sensitivity
 torchrun --nproc_per_node=8 --master_port=29541 train_ablation.py \
     --study batch \
