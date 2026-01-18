@@ -5,69 +5,56 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=36
-#SBATCH --mem=280gb
-#SBATCH --time=144:00:00
-#SBATCH --output=/blue/wdixon/wang.yixuan/rlo_experiments/logs/%x-%j.out
-#SBATCH --error=/blue/wdixon/wang.yixuan/rlo_experiments/logs/%x-%j.err
+#SBATCH --mem=288000mb
+#SBATCH --time=72:00:00
+#SBATCH --output=/blue/wdixon/wang.yixuan/rlo_icml/logs/%x-%j.out
+#SBATCH --error=/blue/wdixon/wang.yixuan/rlo_icml/logs/%x-%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=williamsw2179@gmail.com
+#SBATCH --mail-user=Williamsw2179@gmail.com
 
 set -e
-hostname; date; pwd
-echo "SLURM_TMPDIR: $SLURM_TMPDIR"
-df -h $SLURM_TMPDIR
+echo "=== RLO Language Model Training ==="
+echo "Host: $(hostname)"
+echo "Date: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
 
-module load python conda cuda/12.8
-export XDG_RUNTIME_DIR="${SLURM_TMPDIR}"
+module load conda cuda/12.4
 conda activate ly
 
-BASE="/blue/wdixon/wang.yixuan/rlo_experiments"
-mkdir -p $BASE/{logs,lm,data}
+BASE="/blue/wdixon/wang.yixuan/rlo_icml"
+mkdir -p $BASE/logs $BASE/lm
 
-# Download WikiText if not exists
-SRC_WIKI="$BASE/data/wikitext"
-if [ ! -f "$SRC_WIKI/train.txt" ]; then
+# Copy WikiText-103 to NVMe
+echo "Copying WikiText-103 to NVMe..."
+mkdir -p $SLURM_TMPDIR/wikitext
+if [ -d "/blue/wdixon/wang.yixuan/data/wikitext-103" ]; then
+    cp -r /blue/wdixon/wang.yixuan/data/wikitext-103/* $SLURM_TMPDIR/wikitext/
+elif [ -d "/blue/wdixon/wang.yixuan/data/wikitext-103-raw" ]; then
+    cp -r /blue/wdixon/wang.yixuan/data/wikitext-103-raw/* $SLURM_TMPDIR/wikitext/
+else
     echo "Downloading WikiText-103..."
-    mkdir -p $SRC_WIKI
-    cd $SRC_WIKI
-    wget -q https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-raw-v1.zip || {
-        echo "Failed to download, trying alternative..."
-        wget -q https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/train.txt
-    }
-    if [ -f wikitext-103-raw-v1.zip ]; then
-        unzip -q wikitext-103-raw-v1.zip
-        mv wikitext-103-raw/wiki.train.raw train.txt
-        mv wikitext-103-raw/wiki.valid.raw valid.txt
-        rm -rf wikitext-103-raw wikitext-103-raw-v1.zip
-    fi
+    cd $SLURM_TMPDIR/wikitext
+    wget -q https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-103-raw-v1.zip
+    unzip -q wikitext-103-raw-v1.zip
+    mv wikitext-103-raw/* .
+    rm -rf wikitext-103-raw wikitext-103-raw-v1.zip
 fi
 
-# Copy to local NVMe
-LOCAL_DATA="$SLURM_TMPDIR/wikitext"
-mkdir -p $LOCAL_DATA
-cp "$SRC_WIKI"/*.txt "$LOCAL_DATA/" 2>/dev/null || echo "Using downloaded data directly"
-echo "WikiText data ready: $(ls -la $LOCAL_DATA/ 2>/dev/null || ls -la $SRC_WIKI/)"
+echo "Data files:"
+ls -la $SLURM_TMPDIR/wikitext/
 
 # Copy scripts
-cp $SLURM_SUBMIT_DIR/optimizers.py $BASE/
-cp $SLURM_SUBMIT_DIR/train_lm.py $BASE/
-
-cd $BASE
+cp $BASE/*.py $SLURM_TMPDIR/
+cd $SLURM_TMPDIR
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export OMP_NUM_THREADS=6
+export OMP_NUM_THREADS=4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# Use local data if available, otherwise use source
-DATA_PATH=$LOCAL_DATA
-[ ! -f "$DATA_PATH/train.txt" ] && DATA_PATH=$SRC_WIKI
-
-echo "Using data from: $DATA_PATH"
-
-torchrun --nproc_per_node=8 --master_port=29530 train_lm.py \
-    --optimizer all \
-    --data $DATA_PATH \
+echo "Starting training at $(date)"
+torchrun --nproc_per_node=8 --master_port=29501 train_lm.py \
+    --data $SLURM_TMPDIR/wikitext \
     --output $BASE/lm \
-    --steps 50000
+    --steps 100000
 
-echo "Done: $(date)"
+echo "=== Completed at $(date) ==="
