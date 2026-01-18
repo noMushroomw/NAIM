@@ -24,13 +24,30 @@ conda activate ly
 BASE="/blue/wdixon/wang.yixuan/rlo_icml"
 mkdir -p $BASE/logs $BASE/lm
 
-# Copy WikiText-103 to NVMe
-echo "Copying WikiText-103 to NVMe..."
+# Verify Python scripts exist
+if [ ! -f "$BASE/train_lm.py" ]; then
+    echo "ERROR: train_lm.py not found in $BASE"
+    echo "Please upload all .py files to $BASE first!"
+    exit 1
+fi
+
+# Copy scripts to work directory
+cd $SLURM_TMPDIR
+cp $BASE/optimizers.py .
+cp $BASE/train_lm.py .
+
+# Copy or download WikiText-103
 mkdir -p $SLURM_TMPDIR/wikitext
-if [ -d "/blue/wdixon/wang.yixuan/data/wikitext-103" ]; then
-    cp -r /blue/wdixon/wang.yixuan/data/wikitext-103/* $SLURM_TMPDIR/wikitext/
-elif [ -d "/blue/wdixon/wang.yixuan/data/wikitext-103-raw" ]; then
-    cp -r /blue/wdixon/wang.yixuan/data/wikitext-103-raw/* $SLURM_TMPDIR/wikitext/
+
+WIKITEXT_SRC="/blue/wdixon/wang.yixuan/data/wikitext-103-raw"
+WIKITEXT_SRC2="/blue/wdixon/wang.yixuan/lypcdf/wikitext-103-raw"
+
+if [ -d "$WIKITEXT_SRC" ]; then
+    echo "Copying WikiText-103 from $WIKITEXT_SRC..."
+    cp -r $WIKITEXT_SRC/* $SLURM_TMPDIR/wikitext/
+elif [ -d "$WIKITEXT_SRC2" ]; then
+    echo "Copying WikiText-103 from $WIKITEXT_SRC2..."
+    cp -r $WIKITEXT_SRC2/* $SLURM_TMPDIR/wikitext/
 else
     echo "Downloading WikiText-103..."
     cd $SLURM_TMPDIR/wikitext
@@ -38,14 +55,11 @@ else
     unzip -q wikitext-103-raw-v1.zip
     mv wikitext-103-raw/* .
     rm -rf wikitext-103-raw wikitext-103-raw-v1.zip
+    cd $SLURM_TMPDIR
 fi
 
-echo "Data files:"
+echo "WikiText files:"
 ls -la $SLURM_TMPDIR/wikitext/
-
-# Copy scripts
-cp $BASE/*.py $SLURM_TMPDIR/
-cd $SLURM_TMPDIR
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export OMP_NUM_THREADS=4

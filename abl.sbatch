@@ -24,21 +24,29 @@ conda activate ly
 BASE="/blue/wdixon/wang.yixuan/rlo_icml"
 mkdir -p $BASE/logs $BASE/ablation
 
-# Copy data to NVMe
-echo "Copying CIFAR-100 to NVMe..."
-mkdir -p $SLURM_TMPDIR/cifar
-cp -r /blue/wdixon/wang.yixuan/data/cifar-100-python $SLURM_TMPDIR/cifar/ 2>/dev/null || \
-    echo "CIFAR will be downloaded"
+# Verify Python scripts exist
+if [ ! -f "$BASE/train_ablation.py" ]; then
+    echo "ERROR: train_ablation.py not found in $BASE"
+    echo "Please upload all .py files to $BASE first!"
+    exit 1
+fi
 
-# Copy scripts
-cp $BASE/*.py $SLURM_TMPDIR/
+# Copy scripts to work directory
 cd $SLURM_TMPDIR
+cp $BASE/optimizers.py .
+cp $BASE/train_ablation.py .
+
+# CIFAR-100 will be downloaded automatically by torchvision
+mkdir -p $SLURM_TMPDIR/cifar
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export OMP_NUM_THREADS=4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 echo "Starting training at $(date)"
+echo "Working directory: $(pwd)"
+ls -la
+
 torchrun --nproc_per_node=8 --master_port=29500 train_ablation.py \
     --data $SLURM_TMPDIR/cifar \
     --output $BASE/ablation
