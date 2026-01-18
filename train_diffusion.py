@@ -275,18 +275,24 @@ class GaussianDiffusion:
 
 
 def compute_fid(real_features, fake_features):
-    """Compute FID between two sets of features."""
+    """Compute FID between two sets of features using scipy."""
+    from scipy import linalg
+    
     mu1, sigma1 = real_features.mean(0), np.cov(real_features, rowvar=False)
     mu2, sigma2 = fake_features.mean(0), np.cov(fake_features, rowvar=False)
     
     diff = mu1 - mu2
     
-    # Compute sqrt of product of covariances
-    covmean, _ = np.linalg.eigh(sigma1 @ sigma2)
-    covmean = np.sqrt(np.maximum(covmean, 0)).sum()
+    # Compute sqrt of product of covariances using scipy sqrtm
+    # FID = ||mu1 - mu2||^2 + Tr(sigma1) + Tr(sigma2) - 2*Tr(sqrt(sigma1 @ sigma2))
+    covmean, _ = linalg.sqrtm(sigma1 @ sigma2, disp=False)
     
-    fid = diff @ diff + np.trace(sigma1) + np.trace(sigma2) - 2 * covmean
-    return float(fid)
+    # Handle numerical instability
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+    
+    fid = diff @ diff + np.trace(sigma1) + np.trace(sigma2) - 2 * np.trace(covmean)
+    return float(max(fid, 0))  # FID should be non-negative
 
 
 @torch.no_grad()
@@ -459,7 +465,7 @@ def train_diffusion(opt_name, resolution, data_path, output_dir, epochs, rank, w
         
         # Calculate FID every 20 epochs
         if rank == 0 and (epoch % 20 == 0 or epoch == epochs):
-            fid = calculate_fid(model.module if world_size > 1 else model, diffusion, train_loader, device, num_samples=2000)
+            fid = calculate_fid(model.module if world_size > 1 else model, diffusion, train_loader, device, num_samples=5000)
             results['history'].append({'epoch': epoch, 'loss': avg_loss, 'fid': fid})
             
             marker = '*' if fid < best_fid else ''
