@@ -49,8 +49,16 @@ def get_cifar_loaders(data_path, batch_size, rank, world_size):
         transforms.Normalize([0.5071, 0.4867, 0.4408], [0.2675, 0.2565, 0.2761]),
     ])
     
-    train_dataset = CIFAR100(root=data_path, train=True, download=True, transform=train_transform)
-    val_dataset = CIFAR100(root=data_path, train=False, download=True, transform=val_transform)
+    # Only rank 0 downloads, others wait
+    if rank == 0:
+        CIFAR100(root=data_path, train=True, download=True, transform=train_transform)
+        CIFAR100(root=data_path, train=False, download=True, transform=val_transform)
+    
+    if world_size > 1:
+        dist.barrier()  # Wait for rank 0 to finish downloading
+    
+    train_dataset = CIFAR100(root=data_path, train=True, download=False, transform=train_transform)
+    val_dataset = CIFAR100(root=data_path, train=False, download=False, transform=val_transform)
     
     train_sampler = DistributedSampler(train_dataset, world_size, rank) if world_size > 1 else None
     train_loader = DataLoader(train_dataset, batch_size, shuffle=(train_sampler is None),
