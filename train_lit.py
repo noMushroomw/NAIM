@@ -222,6 +222,9 @@ def zero_shot_evaluate(model, loader, device, tokenizer, class_names):
     """Zero-shot evaluation using text prompts."""
     model.eval()
     
+    # Unwrap DDP model if necessary
+    raw_model = model.module if hasattr(model, 'module') else model
+    
     # Create text embeddings for all classes
     templates = [
         "a photo of a {}.",
@@ -239,14 +242,14 @@ def zero_shot_evaluate(model, loader, device, tokenizer, class_names):
             text = template.format(class_name.replace('_', ' '))
             tokens = tokenizer(text).unsqueeze(0).to(device)
             
-            if hasattr(model, 'use_hf') and model.use_hf:
-                text_out = model.text(tokens)
-                embed = model.text_proj(text_out.pooler_output)
+            if hasattr(raw_model, 'use_hf') and raw_model.use_hf:
+                text_out = raw_model.text(tokens)
+                embed = raw_model.text_proj(text_out.pooler_output)
                 embed = F.normalize(embed, dim=-1)
-            elif hasattr(model, 'clip'):
-                embed = model.clip.text(tokens)
+            elif hasattr(raw_model, 'clip'):
+                embed = raw_model.clip.text(tokens)
             else:
-                embed = model.text(tokens)
+                embed = raw_model.text(tokens)
             
             class_embeds.append(embed)
         
@@ -262,14 +265,14 @@ def zero_shot_evaluate(model, loader, device, tokenizer, class_names):
         images, labels = images.to(device), labels.to(device)
         
         # Get image embeddings
-        if hasattr(model, 'use_hf') and model.use_hf:
-            vis_out = model.visual(images)
-            image_embeds = model.visual_proj(vis_out.pooler_output)
+        if hasattr(raw_model, 'use_hf') and raw_model.use_hf:
+            vis_out = raw_model.visual(images)
+            image_embeds = raw_model.visual_proj(vis_out.pooler_output)
             image_embeds = F.normalize(image_embeds, dim=-1)
-        elif hasattr(model, 'clip'):
-            image_embeds = model.clip.visual(images)
+        elif hasattr(raw_model, 'clip'):
+            image_embeds = raw_model.clip.visual(images)
         else:
-            image_embeds = model.visual(images)
+            image_embeds = raw_model.visual(images)
         
         # Compute similarities
         logits = image_embeds @ text_embeddings.T
@@ -344,7 +347,7 @@ def train_lit(opt_name, data_path, output_dir, epochs, rank, world_size, device,
     model = LiTModel(embed_dim=512, use_pretrained=True).to(device)
     
     if world_size > 1:
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[rank])
     
     if rank == 0:
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
