@@ -2,10 +2,6 @@
 """
 Diffusion Model Training on ImageNet 64x64
 DDPM with U-Net, reports FID (lower is better, target: 10-50)
-
-Key fixes:
-- init_conv to project 3 channels to base_ch before GroupNorm
-- Dynamic GroupNorm that handles any channel count
 """
 import os, gc, math, json, logging, argparse
 from pathlib import Path
@@ -42,7 +38,6 @@ def setup_logger(out, rank, name):
 
 def get_group_norm(channels, num_groups=32):
     """Create GroupNorm with proper num_groups for any channel count."""
-    # Find largest divisor <= num_groups
     for g in [32, 16, 8, 4, 2, 1]:
         if channels >= g and channels % g == 0:
             return nn.GroupNorm(g, channels)
@@ -55,11 +50,13 @@ class SinusoidalPosEmb(nn.Module):
         self.dim = dim
     
     def forward(self, t):
-        half = self.dim // 2
-        emb = math.log(10000) / (half - 1)
-        emb = torch.exp(torch.arange(half, device=t.device) * -emb)
+        device = t.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
         emb = t[:, None] * emb[None, :]
-        return torch.cat([emb.sin(), emb.cos()], dim=-1)
+        emb = torch.cat([emb.sin(), emb.cos()], dim=-1)
+        return emb
 
 
 class ResBlock(nn.Module):
@@ -67,46 +64,47 @@ class ResBlock(nn.Module):
         super().__init__()
         self.norm1 = get_group_norm(in_ch)
         self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.time_mlp = nn.Sequential(nn.SiLU(), nn.Linear(time_dim, out_ch))
+        self.time_proj = nn.Linear(time_dim, out_ch)
         self.norm2 = get_group_norm(out_ch)
         self.dropout = nn.Dropout(dropout)
         self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
         self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
     
-    def forward(self, x, t):
+    def forward(self, x, t_emb):
         h = self.conv1(F.silu(self.norm1(x)))
-        h = h + self.time_mlp(t)[:, :, None, None]
+        h = h + self.time_proj(F.silu(t_emb))[:, :, None, None]
         h = self.conv2(self.dropout(F.silu(self.norm2(h))))
         return h + self.skip(x)
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads=4):
+    def __init__(self, ch, num_heads=4):
         super().__init__()
-        self.heads = heads
-        self.norm = get_group_norm(dim)
-        self.qkv = nn.Conv2d(dim, dim * 3, 1)
-        self.proj = nn.Conv2d(dim, dim, 1)
+        self.num_heads = num_heads
+        self.norm = get_group_norm(ch)
+        self.qkv = nn.Conv2d(ch, ch * 3, 1)
+        self.proj = nn.Conv2d(ch, ch, 1)
     
     def forward(self, x):
         B, C, H, W = x.shape
-        x = self.norm(x)
-        qkv = self.qkv(x).reshape(B, 3, self.heads, C // self.heads, H * W)
-        q, k, v = qkv.unbind(1)
-        q = q.transpose(-1, -2)
-        k = k.transpose(-1, -2)
-        v = v.transpose(-1, -2)
-        
+        h = self.norm(x)
+        qkv = self.qkv(h).reshape(B, 3, self.num_heads, C // self.num_heads, H * W)
+        q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+        q = q.permute(0, 1, 3, 2)
+        k = k.permute(0, 1, 3, 2)
+        v = v.permute(0, 1, 3, 2)
         out = F.scaled_dot_product_attention(q, k, v)
-        out = out.transpose(-1, -2).reshape(B, C, H, W)
+        out = out.permute(0, 1, 3, 2).reshape(B, C, H, W)
         return self.proj(out) + x
 
 
 class UNet(nn.Module):
-    """U-Net for diffusion with proper channel handling."""
-    def __init__(self, in_ch=3, base_ch=128, ch_mults=(1, 2, 2, 4), time_dim=256, num_res=2, attn_resolutions=(16,)):
+    """
+    Simple but correct U-Net for diffusion.
+    Resolution progression: 64 -> 32 -> 16 -> 8 (bottleneck) -> 16 -> 32 -> 64
+    """
+    def __init__(self, in_ch=3, base_ch=128, ch_mults=(1, 2, 2, 4), time_dim=256, num_res=2):
         super().__init__()
-        self.time_dim = time_dim
         
         # Time embedding
         self.time_mlp = nn.Sequential(
@@ -116,59 +114,61 @@ class UNet(nn.Module):
             nn.Linear(time_dim, time_dim),
         )
         
-        # Initial projection: 3 -> base_ch (FIXES GroupNorm issue!)
+        # Initial conv
         self.init_conv = nn.Conv2d(in_ch, base_ch, 3, padding=1)
         
         # Encoder
-        self.encoder = nn.ModuleList()
-        self.downsample = nn.ModuleList()
+        self.down_blocks = nn.ModuleList()
+        self.down_samples = nn.ModuleList()
         
         ch = base_ch
-        chs = [ch]
-        
         for i, mult in enumerate(ch_mults):
             out_ch = base_ch * mult
+            blocks = nn.ModuleList()
             for _ in range(num_res):
-                self.encoder.append(ResBlock(ch, out_ch, time_dim))
+                blocks.append(ResBlock(ch, out_ch, time_dim))
                 ch = out_ch
-                chs.append(ch)
-                
-                # Attention at specified resolutions
-                if i in [len(ch_mults) - 1]:  # Only at lowest resolution
-                    self.encoder.append(Attention(ch))
-                    chs.append(ch)
+            if i == len(ch_mults) - 1:  # Attention at bottleneck
+                blocks.append(Attention(ch))
+            self.down_blocks.append(blocks)
             
             if i < len(ch_mults) - 1:
-                self.downsample.append(nn.Conv2d(ch, ch, 3, stride=2, padding=1))
-                chs.append(ch)
+                self.down_samples.append(nn.Conv2d(ch, ch, 3, stride=2, padding=1))
+            else:
+                self.down_samples.append(None)
         
         # Middle
-        self.mid1 = ResBlock(ch, ch, time_dim)
+        self.mid_block1 = ResBlock(ch, ch, time_dim)
         self.mid_attn = Attention(ch)
-        self.mid2 = ResBlock(ch, ch, time_dim)
+        self.mid_block2 = ResBlock(ch, ch, time_dim)
         
         # Decoder
-        self.decoder = nn.ModuleList()
-        self.upsample = nn.ModuleList()
+        self.up_blocks = nn.ModuleList()
+        self.up_samples = nn.ModuleList()
         
         for i, mult in reversed(list(enumerate(ch_mults))):
             out_ch = base_ch * mult
+            blocks = nn.ModuleList()
             for j in range(num_res + 1):
-                skip_ch = chs.pop()
-                self.decoder.append(ResBlock(ch + skip_ch, out_ch, time_dim))
+                # First block receives skip connection (doubles channels)
+                in_channels = ch + out_ch if j == 0 else ch
+                blocks.append(ResBlock(in_channels, out_ch, time_dim))
                 ch = out_ch
-                
-                if i in [len(ch_mults) - 1] and j < num_res:
-                    self.decoder.append(Attention(ch))
-                    chs.pop()  # Pop the attention skip
+            if i == len(ch_mults) - 1:  # Attention at bottleneck level
+                blocks.append(Attention(ch))
+            self.up_blocks.append(blocks)
             
             if i > 0:
-                self.upsample.append(nn.ConvTranspose2d(ch, ch, 4, stride=2, padding=1))
+                self.up_samples.append(nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode='nearest'),
+                    nn.Conv2d(ch, ch, 3, padding=1)
+                ))
+            else:
+                self.up_samples.append(None)
         
         # Output
         self.out_norm = get_group_norm(ch)
         self.out_conv = nn.Conv2d(ch, in_ch, 3, padding=1)
-        
         nn.init.zeros_(self.out_conv.weight)
         nn.init.zeros_(self.out_conv.bias)
     
@@ -178,39 +178,34 @@ class UNet(nn.Module):
         # Initial conv
         x = self.init_conv(x)
         
-        # Encoder
-        skips = [x]
-        down_idx = 0
-        
-        for layer in self.encoder:
-            if isinstance(layer, ResBlock):
-                x = layer(x, t_emb)
-            elif isinstance(layer, Attention):
-                x = layer(x)
+        # Encoder - save skip connections
+        skips = []
+        for blocks, down in zip(self.down_blocks, self.down_samples):
+            for block in blocks:
+                if isinstance(block, ResBlock):
+                    x = block(x, t_emb)
+                else:
+                    x = block(x)
             skips.append(x)
-        
-        for down in self.downsample:
-            x = down(x)
-            skips.append(x)
+            if down is not None:
+                x = down(x)
         
         # Middle
-        x = self.mid1(x, t_emb)
+        x = self.mid_block1(x, t_emb)
         x = self.mid_attn(x)
-        x = self.mid2(x, t_emb)
+        x = self.mid_block2(x, t_emb)
         
-        # Decoder
-        up_idx = 0
-        for i, layer in enumerate(self.decoder):
-            if isinstance(layer, ResBlock):
-                skip = skips.pop()
-                x = torch.cat([x, skip], dim=1)
-                x = layer(x, t_emb)
-            elif isinstance(layer, Attention):
-                x = layer(x)
-                skips.pop()
-        
-        for up in self.upsample:
-            x = up(x)
+        # Decoder - use skip connections in reverse
+        for blocks, up in zip(self.up_blocks, self.up_samples):
+            skip = skips.pop()
+            x = torch.cat([x, skip], dim=1)
+            for i, block in enumerate(blocks):
+                if isinstance(block, ResBlock):
+                    x = block(x, t_emb) if i == 0 else block(x, t_emb)
+                else:
+                    x = block(x)
+            if up is not None:
+                x = up(x)
         
         return self.out_conv(F.silu(self.out_norm(x)))
 
@@ -219,130 +214,118 @@ class GaussianDiffusion:
     """DDPM diffusion process."""
     def __init__(self, timesteps=1000, beta_start=1e-4, beta_end=0.02):
         self.timesteps = timesteps
-        
         betas = torch.linspace(beta_start, beta_end, timesteps)
-        alphas = 1.0 - betas
+        alphas = 1 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
         
-        self.register_buffer = lambda name, val: setattr(self, name, val)
         self.register_buffer('betas', betas)
         self.register_buffer('alphas_cumprod', alphas_cumprod)
         self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
-        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1.0 - alphas_cumprod))
-        self.register_buffer('sqrt_recip_alphas', torch.sqrt(1.0 / alphas))
-        self.register_buffer('posterior_variance', betas * (1.0 - torch.cat([torch.tensor([0.0]), alphas_cumprod[:-1]])) / (1.0 - alphas_cumprod))
+        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1 - alphas_cumprod))
+    
+    def register_buffer(self, name, tensor):
+        setattr(self, name, tensor)
     
     def to(self, device):
-        for name in ['betas', 'alphas_cumprod', 'sqrt_alphas_cumprod', 'sqrt_one_minus_alphas_cumprod', 'sqrt_recip_alphas', 'posterior_variance']:
-            setattr(self, name, getattr(self, name).to(device))
+        for attr in ['betas', 'alphas_cumprod', 'sqrt_alphas_cumprod', 'sqrt_one_minus_alphas_cumprod']:
+            setattr(self, attr, getattr(self, attr).to(device))
         return self
     
-    def q_sample(self, x0, t, noise=None):
+    def q_sample(self, x_0, t, noise=None):
         if noise is None:
-            noise = torch.randn_like(x0)
+            noise = torch.randn_like(x_0)
         sqrt_alpha = self.sqrt_alphas_cumprod[t][:, None, None, None]
-        sqrt_one_minus = self.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
-        return sqrt_alpha * x0 + sqrt_one_minus * noise
+        sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
+        return sqrt_alpha * x_0 + sqrt_one_minus_alpha * noise
     
-    def p_losses(self, model, x0, t):
-        noise = torch.randn_like(x0)
-        x_noisy = self.q_sample(x0, t, noise)
+    def p_losses(self, model, x_0, t, noise=None):
+        if noise is None:
+            noise = torch.randn_like(x_0)
+        x_noisy = self.q_sample(x_0, t, noise)
         pred_noise = model(x_noisy, t.float())
         return F.mse_loss(pred_noise, noise)
     
     @torch.no_grad()
-    def p_sample(self, model, x, t):
-        betas_t = self.betas[t][:, None, None, None]
-        sqrt_recip = self.sqrt_recip_alphas[t][:, None, None, None]
-        sqrt_one_minus = self.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
+    def p_sample(self, model, x, t, t_idx):
+        pred_noise = model(x, t)
+        alpha = self.alphas_cumprod[t_idx]
+        alpha_prev = self.alphas_cumprod[t_idx - 1] if t_idx > 0 else torch.tensor(1.0, device=x.device)
+        beta = self.betas[t_idx]
         
-        pred_noise = model(x, t.float())
-        mean = sqrt_recip * (x - betas_t * pred_noise / sqrt_one_minus)
+        pred_x0 = (x - torch.sqrt(1 - alpha) * pred_noise) / torch.sqrt(alpha)
+        pred_x0 = pred_x0.clamp(-1, 1)
         
-        if t[0] > 0:
+        if t_idx > 0:
             noise = torch.randn_like(x)
-            var = self.posterior_variance[t][:, None, None, None]
-            return mean + torch.sqrt(var) * noise
-        return mean
+            sigma = torch.sqrt(beta * (1 - alpha_prev) / (1 - alpha))
+            x = torch.sqrt(alpha_prev) * pred_x0 + torch.sqrt(1 - alpha_prev - sigma**2) * pred_noise + sigma * noise
+        else:
+            x = pred_x0
+        return x
     
     @torch.no_grad()
     def sample(self, model, shape, device):
         x = torch.randn(shape, device=device)
-        for t in reversed(range(self.timesteps)):
-            t_batch = torch.full((shape[0],), t, device=device, dtype=torch.long)
-            x = self.p_sample(model, x, t_batch)
+        for t_idx in reversed(range(self.timesteps)):
+            t = torch.full((shape[0],), t_idx, device=device, dtype=torch.float)
+            x = self.p_sample(model, x, t, t_idx)
         return x
 
 
 def compute_fid(real_features, fake_features):
-    """Compute FID between two sets of features using scipy."""
+    """Compute FID between two sets of features."""
     from scipy import linalg
     
     mu1, sigma1 = real_features.mean(0), np.cov(real_features, rowvar=False)
     mu2, sigma2 = fake_features.mean(0), np.cov(fake_features, rowvar=False)
     
     diff = mu1 - mu2
-    
-    # Compute sqrt of product of covariances using scipy sqrtm
-    # FID = ||mu1 - mu2||^2 + Tr(sigma1) + Tr(sigma2) - 2*Tr(sqrt(sigma1 @ sigma2))
     covmean, _ = linalg.sqrtm(sigma1 @ sigma2, disp=False)
-    
-    # Handle numerical instability
     if np.iscomplexobj(covmean):
         covmean = covmean.real
     
     fid = diff @ diff + np.trace(sigma1) + np.trace(sigma2) - 2 * np.trace(covmean)
-    return float(max(fid, 0))  # FID should be non-negative
+    return float(max(fid, 0))
 
 
 @torch.no_grad()
 def get_inception_features(images, inception_model, device):
-    """Extract Inception features for FID calculation."""
-    # Resize to 299x299 for Inception
     images = F.interpolate(images, size=(299, 299), mode='bilinear', align_corners=False)
-    
-    # Normalize to [-1, 1]
     images = 2 * images - 1
-    
     features = inception_model(images)
     return features.cpu().numpy()
 
 
 @torch.no_grad()
 def calculate_fid(model, diffusion, real_loader, device, num_samples=5000, batch_size=50):
-    """Calculate FID score."""
     model.eval()
     
-    # Try to use torchvision inception
     try:
         from torchvision.models import inception_v3, Inception_V3_Weights
         inception = inception_v3(weights=Inception_V3_Weights.DEFAULT, transform_input=False)
-        inception.fc = nn.Identity()  # Remove classification head
+        inception.fc = nn.Identity()
         inception = inception.to(device).eval()
     except Exception as e:
         print(f"Could not load Inception: {e}")
         return -1.0
     
-    # Get real features
     real_features = []
     for images, _ in real_loader:
-        if len(real_features) * batch_size >= num_samples:
+        if len(real_features) * images.size(0) >= num_samples:
             break
         images = images.to(device)
         feats = get_inception_features(images, inception, device)
         real_features.append(feats)
     real_features = np.concatenate(real_features, axis=0)[:num_samples]
     
-    # Generate fake images and get features
     fake_features = []
     while len(fake_features) * batch_size < num_samples:
         fake_images = diffusion.sample(model, (batch_size, 3, 64, 64), device)
-        fake_images = fake_images.clamp(-1, 1) * 0.5 + 0.5  # [-1,1] -> [0,1]
+        fake_images = fake_images.clamp(-1, 1) * 0.5 + 0.5
         feats = get_inception_features(fake_images, inception, device)
         fake_features.append(feats)
     fake_features = np.concatenate(fake_features, axis=0)[:num_samples]
     
-    # Compute FID
     fid = compute_fid(real_features, fake_features)
     
     del inception
@@ -352,7 +335,6 @@ def calculate_fid(model, diffusion, real_loader, device, num_samples=5000, batch
 
 
 def train_diffusion(opt_name, resolution, data_path, output_dir, epochs, rank, world_size, device, logger):
-    # Tuned configs
     configs = {
         'adamw': {'lr': 2e-4, 'wd': 0.01, 'betas': (0.9, 0.999)},
         'lion': {'lr': 2e-5, 'wd': 0.1, 'betas': (0.9, 0.99)},
@@ -369,13 +351,12 @@ def train_diffusion(opt_name, resolution, data_path, output_dir, epochs, rank, w
         logger.info(f"LR={cfg['lr']}, WD={cfg['wd']}")
         logger.info("=" * 70)
     
-    # Data
     transform = transforms.Compose([
         transforms.Resize(resolution),
         transforms.CenterCrop(resolution),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),  # [-1, 1]
+        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
     ])
     
     train_path = data_path / 'train'
@@ -384,19 +365,18 @@ def train_diffusion(opt_name, resolution, data_path, output_dir, epochs, rank, w
     
     train_dataset = ImageFolder(train_path, transform)
     
-    batch_size = 32  # Per GPU
+    if rank == 0:
+        logger.info(f"Samples: {len(train_dataset)}")
+    
+    batch_size = 32
     
     train_sampler = DistributedSampler(train_dataset, world_size, rank) if world_size > 1 else None
     train_loader = DataLoader(train_dataset, batch_size, shuffle=(train_sampler is None),
                              sampler=train_sampler, num_workers=8, pin_memory=True,
                              drop_last=True, persistent_workers=True)
     
-    if rank == 0:
-        logger.info(f"Samples: {len(train_dataset)}")
-    
-    # Model
-    base_ch = 128
-    model = UNet(in_ch=3, base_ch=base_ch, ch_mults=(1, 2, 2, 4), time_dim=256).to(device)
+    model = UNet(in_ch=3, base_ch=128, ch_mults=(1, 2, 2, 4), time_dim=256, num_res=2).to(device)
+    diffusion = GaussianDiffusion(timesteps=1000).to(device)
     
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
@@ -405,13 +385,8 @@ def train_diffusion(opt_name, resolution, data_path, output_dir, epochs, rank, w
         params = sum(p.numel() for p in model.parameters()) / 1e6
         logger.info(f"Parameters: {params:.1f}M")
     
-    # Diffusion
-    diffusion = GaussianDiffusion(timesteps=1000).to(device)
-    
-    # Optimizer
     optimizer = create_optimizer(opt_name, model.parameters(), lr=cfg['lr'], weight_decay=cfg['wd'], betas=cfg['betas'])
     
-    # LR schedule
     warmup_epochs = 5
     total_steps = epochs * len(train_loader)
     warmup_steps = warmup_epochs * len(train_loader)
@@ -419,15 +394,13 @@ def train_diffusion(opt_name, resolution, data_path, output_dir, epochs, rank, w
     def lr_lambda(step):
         if step < warmup_steps:
             return (step + 1) / warmup_steps
-        return 1.0  # Constant LR after warmup
+        return 1.0
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
-    # Training
     scaler = torch.amp.GradScaler()
     best_fid = float('inf')
     results = {'optimizer': opt_name, 'history': []}
-    global_step = 0
     
     for epoch in range(1, epochs + 1):
         model.train()
@@ -439,8 +412,7 @@ def train_diffusion(opt_name, resolution, data_path, output_dir, epochs, rank, w
         
         for images, _ in train_loader:
             images = images.to(device)
-            
-            t = torch.randint(0, diffusion.timesteps, (images.shape[0],), device=device)
+            t = torch.randint(0, diffusion.timesteps, (images.size(0),), device=device)
             
             optimizer.zero_grad()
             
@@ -459,22 +431,19 @@ def train_diffusion(opt_name, resolution, data_path, output_dir, epochs, rank, w
             
             total_loss += loss.item()
             num_batches += 1
-            global_step += 1
         
         avg_loss = total_loss / max(num_batches, 1)
         
-        # Calculate FID every 20 epochs
-        if rank == 0 and (epoch % 20 == 0 or epoch == epochs):
+        if rank == 0 and epoch % 10 == 0:
+            logger.info(f"E{epoch:3d}: loss={avg_loss:.4f}")
+        
+        if rank == 0 and (epoch % 25 == 0 or epoch == epochs):
             fid = calculate_fid(model.module if world_size > 1 else model, diffusion, train_loader, device, num_samples=5000)
             results['history'].append({'epoch': epoch, 'loss': avg_loss, 'fid': fid})
             
             marker = '*' if fid < best_fid else ''
-            if fid > 0:
-                best_fid = min(best_fid, fid)
+            best_fid = min(best_fid, fid) if fid > 0 else best_fid
             logger.info(f"E{epoch:3d}: loss={avg_loss:.4f} FID={fid:.2f}{marker}")
-            model.train()
-        elif rank == 0 and epoch % 10 == 0:
-            logger.info(f"E{epoch:3d}: loss={avg_loss:.4f}")
     
     if rank == 0:
         results['best_fid'] = best_fid
