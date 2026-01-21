@@ -9,3 +9,9 @@ results_*/
 rlo_*
 .json
 new_rlo_experiments/
+checkpoints_ablation/
+results_classification/
+*.log
+*.npz
+*.sh
+
