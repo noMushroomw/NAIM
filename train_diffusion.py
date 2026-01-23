@@ -419,8 +419,16 @@ def train_diffusion(opt_name, resolution, data_path, output_dir, epochs, rank, w
             with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
                 loss = diffusion.p_losses(model, images, t)
             
-            if torch.isnan(loss) or torch.isinf(loss):
-                continue
+            # CRITICAL: 在分布式训练中，必须同步 NaN 检查
+            # 否则不同 rank 跳过不同数量的 batch 会导致 NCCL 死锁
+            has_nan = torch.isnan(loss) or torch.isinf(loss)
+            if world_size > 1:
+                has_nan_tensor = torch.tensor([1.0 if has_nan else 0.0], device=device)
+                dist.all_reduce(has_nan_tensor, op=dist.ReduceOp.MAX)
+                has_nan = has_nan_tensor.item() > 0
+            
+            if has_nan:
+                continue  # 所有 rank 一起跳过
             
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
