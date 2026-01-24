@@ -1,16 +1,7 @@
 #!/usr/bin/env python3
 """
-Image Classification: ViT-B/16, ViT-S/16, ResNet-50 on ImageNet
+Image Classification: ViT-B/16 on ImageNet
 90 epochs, reports Top-1 Accuracy
-
-Supported models:
-- vit_b16: ViT-B/16 (768 dim, 12 layers, 12 heads, ~86M params)
-- vit_s16: ViT-S/16 (384 dim, 12 layers, 6 heads, ~22M params)  
-- resnet50: ResNet-50 (~25M params)
-
-Hyperparameters follow Lion paper Table 2:
-- AdamW: lr=3e-3, wd=0.3, β=(0.9, 0.999)
-- Lion/RLO: lr=3e-4 (0.1x), wd=1.0 (10x), β=(0.9, 0.99)
 """
 import os, gc, math, json, logging, argparse
 from pathlib import Path
@@ -43,10 +34,6 @@ def setup_logger(out, rank, name):
         logger.addHandler(ch)
     return logger
 
-
-# ============================================================================
-# ViT Components
-# ============================================================================
 
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
@@ -114,25 +101,28 @@ class Block(nn.Module):
         return x * mask
 
 
-class ViT(nn.Module):
-    """Vision Transformer with configurable size."""
-    def __init__(self, num_classes=1000, embed_dim=768, depth=12, num_heads=12,
-                 dropout=0.0, drop_path=0.1):
+class ViTB16(nn.Module):
+    """ViT-B/16: 768 dim, 12 layers, 12 heads (~86M params)."""
+    def __init__(self, num_classes=1000, dropout=0.0, drop_path=0.1):
         super().__init__()
-        self.patch_embed = PatchEmbed(224, 16, 3, embed_dim)
+        dim = 768
+        depth = 12
+        num_heads = 12
+        
+        self.patch_embed = PatchEmbed(224, 16, 3, dim)
         num_patches = self.patch_embed.num_patches
         
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, dim))
         self.pos_drop = nn.Dropout(dropout)
         
         dpr = [drop_path * i / (depth - 1) for i in range(depth)]
         self.blocks = nn.ModuleList([
-            Block(embed_dim, num_heads, 4.0, dropout, dpr[i]) for i in range(depth)
+            Block(dim, num_heads, 4.0, dropout, dpr[i]) for i in range(depth)
         ])
         
-        self.norm = nn.LayerNorm(embed_dim)
-        self.head = nn.Linear(embed_dim, num_classes)
+        self.norm = nn.LayerNorm(dim)
+        self.head = nn.Linear(dim, num_classes)
         
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.cls_token, std=0.02)
@@ -153,128 +143,6 @@ class ViT(nn.Module):
         return self.head(x)
 
 
-# ============================================================================
-# ResNet-50 Components
-# ============================================================================
-
-class Bottleneck(nn.Module):
-    expansion = 4
-    
-    def __init__(self, in_planes, planes, stride=1, downsample=None):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_planes, planes, 1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, 3, stride, 1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.conv3 = nn.Conv2d(planes, planes * self.expansion, 1, bias=False)
-        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
-        self.relu = nn.ReLU(inplace=True)
-        self.downsample = downsample
-    
-    def forward(self, x):
-        identity = x
-        
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
-        
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        
-        out += identity
-        return self.relu(out)
-
-
-class ResNet50(nn.Module):
-    """ResNet-50 for ImageNet (~25M params)."""
-    def __init__(self, num_classes=1000):
-        super().__init__()
-        self.in_planes = 64
-        
-        self.conv1 = nn.Conv2d(3, 64, 7, 2, 3, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(3, 2, 1)
-        
-        self.layer1 = self._make_layer(64, 3, stride=1)
-        self.layer2 = self._make_layer(128, 4, stride=2)
-        self.layer3 = self._make_layer(256, 6, stride=2)
-        self.layer4 = self._make_layer(512, 3, stride=2)
-        
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512 * Bottleneck.expansion, num_classes)
-        
-        # Initialize
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-    
-    def _make_layer(self, planes, blocks, stride):
-        downsample = None
-        if stride != 1 or self.in_planes != planes * Bottleneck.expansion:
-            downsample = nn.Sequential(
-                nn.Conv2d(self.in_planes, planes * Bottleneck.expansion, 1, stride, bias=False),
-                nn.BatchNorm2d(planes * Bottleneck.expansion),
-            )
-        
-        layers = [Bottleneck(self.in_planes, planes, stride, downsample)]
-        self.in_planes = planes * Bottleneck.expansion
-        for _ in range(1, blocks):
-            layers.append(Bottleneck(self.in_planes, planes))
-        
-        return nn.Sequential(*layers)
-    
-    def forward(self, x):
-        x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
-        
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        return self.fc(x)
-
-
-# ============================================================================
-# Model Configurations
-# ============================================================================
-
-MODEL_CONFIGS = {
-    'vit_b16': {
-        'model_class': ViT,
-        'model_kwargs': {'embed_dim': 768, 'depth': 12, 'num_heads': 12, 'drop_path': 0.1},
-        'batch_size': 64,   # Per GPU micro-batch (smaller due to larger model)
-        'description': 'ViT-B/16 (~86M params)',
-    },
-    'vit_s16': {
-        'model_class': ViT,
-        'model_kwargs': {'embed_dim': 384, 'depth': 12, 'num_heads': 6, 'drop_path': 0.1},
-        'batch_size': 128,  # Per GPU micro-batch
-        'description': 'ViT-S/16 (~22M params)',
-    },
-    'resnet50': {
-        'model_class': ResNet50,
-        'model_kwargs': {},
-        'batch_size': 128,  # Per GPU micro-batch
-        'description': 'ResNet-50 (~25M params)',
-    },
-}
-
-# Optimizer configs following Lion paper Table 2
-OPTIMIZER_CONFIGS = {
-    'adamw': {'lr': 3e-3, 'wd': 0.3, 'betas': (0.9, 0.999)},
-    'lion': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},
-    'rlo': {'lr': 3.5e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},
-    'rlo_lambda_a': {'lr': 3.5e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},
-    'smooth_lifted_rlo': {'lr': 3.5e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},
-}
-
-
 @torch.no_grad()
 def evaluate(model, loader, device):
     model.eval()
@@ -289,15 +157,22 @@ def evaluate(model, loader, device):
     return 100.0 * correct / total
 
 
-def train_classification(model_name, opt_name, data_path, output_dir, epochs, 
-                         rank, world_size, device, logger):
-    model_cfg = MODEL_CONFIGS[model_name]
-    opt_cfg = OPTIMIZER_CONFIGS.get(opt_name, OPTIMIZER_CONFIGS['adamw'])
+def train_classification(opt_name, data_path, output_dir, epochs, rank, world_size, device, logger):
+    # Tuned configs following Lion paper Table 2
+    configs = {
+        'adamw': {'lr': 3e-3, 'wd': 0.3, 'betas': (0.9, 0.999)},
+        'lion': {'lr': 3e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},
+        'rlo': {'lr': 3.5e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},
+        'rlo_lambda_a': {'lr': 3.5e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},
+        'smooth_lifted_rlo': {'lr': 3.5e-4, 'wd': 1.0, 'betas': (0.9, 0.99)},
+    }
+    
+    cfg = configs.get(opt_name, configs['adamw'])
     
     if rank == 0:
         logger.info("=" * 70)
-        logger.info(f"{model_cfg['description']} Classification: {opt_name}")
-        logger.info(f"LR={opt_cfg['lr']}, WD={opt_cfg['wd']}")
+        logger.info(f"ViT-B/16 Classification: {opt_name}")
+        logger.info(f"LR={cfg['lr']}, WD={cfg['wd']}")
         logger.info("=" * 70)
     
     # Data augmentation
@@ -328,8 +203,8 @@ def train_classification(model_name, opt_name, data_path, output_dir, epochs,
     train_dataset = ImageFolder(train_path, train_transform)
     val_dataset = ImageFolder(val_path, val_transform)
     
-    # Batch size: 1024 global, configured per model for GPU memory
-    batch_size = model_cfg['batch_size']
+    # Batch size: 1024 global, 128 per GPU for 8 GPUs
+    batch_size = 128
     
     train_sampler = DistributedSampler(train_dataset, world_size, rank) if world_size > 1 else None
     train_loader = DataLoader(train_dataset, batch_size, shuffle=(train_sampler is None),
@@ -339,11 +214,9 @@ def train_classification(model_name, opt_name, data_path, output_dir, epochs,
     
     if rank == 0:
         logger.info(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
-        logger.info(f"Batch size per GPU: {batch_size}")
     
     # Model
-    ModelClass = model_cfg['model_class']
-    model = ModelClass(num_classes=1000, **model_cfg['model_kwargs']).to(device)
+    model = ViTB16(num_classes=1000, dropout=0.0, drop_path=0.1).to(device)
     
     if world_size > 1:
         model = DDP(model, device_ids=[rank])
@@ -353,8 +226,7 @@ def train_classification(model_name, opt_name, data_path, output_dir, epochs,
         logger.info(f"Parameters: {params:.1f}M")
     
     # Optimizer
-    optimizer = create_optimizer(opt_name, model.parameters(), lr=opt_cfg['lr'], 
-                                 weight_decay=opt_cfg['wd'], betas=opt_cfg['betas'])
+    optimizer = create_optimizer(opt_name, model.parameters(), lr=cfg['lr'], weight_decay=cfg['wd'], betas=cfg['betas'])
     
     # LR schedule: warmup + cosine
     warmup_epochs = 5
@@ -372,7 +244,7 @@ def train_classification(model_name, opt_name, data_path, output_dir, epochs,
     # Training
     scaler = torch.amp.GradScaler()
     best_acc = 0
-    results = {'model': model_name, 'optimizer': opt_name, 'history': []}
+    results = {'optimizer': opt_name, 'history': []}
     
     for epoch in range(1, epochs + 1):
         model.train()
@@ -421,30 +293,19 @@ def train_classification(model_name, opt_name, data_path, output_dir, epochs,
         results['best_acc'] = best_acc
         logger.info(f"Final: Best Acc = {best_acc:.2f}%")
     
-    # Cleanup
     del model, optimizer, scheduler
     gc.collect()
     torch.cuda.empty_cache()
-    
-    if world_size > 1:
-        dist.barrier()
     
     return results
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default='vit_b16', 
-                        choices=['vit_b16', 'vit_s16', 'resnet50'],
-                        help='Model architecture to train')
-    parser.add_argument('--optimizer', type=str, default='all',
-                        help='Optimizer name or "all" for all optimizers')
-    parser.add_argument('--data', type=str, required=True,
-                        help='Path to ImageNet dataset')
-    parser.add_argument('--output', type=str, required=True,
-                        help='Output directory for logs and results')
-    parser.add_argument('--epochs', type=int, default=90,
-                        help='Number of training epochs')
+    parser.add_argument('--optimizer', type=str, default='all')
+    parser.add_argument('--data', type=str, required=True)
+    parser.add_argument('--output', type=str, required=True)
+    parser.add_argument('--epochs', type=int, default=90)
     args = parser.parse_args()
     
     rank = int(os.environ.get('RANK', 0))
@@ -459,22 +320,19 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    logger = setup_logger(output_dir, rank, f'cls_{args.model}')
+    logger = setup_logger(output_dir, rank, 'cls_vit_b16')
     
     if args.optimizer == 'all':
-        optimizers = list(OPTIMIZER_CONFIGS.keys())
+        optimizers = ['adamw', 'lion', 'rlo', 'rlo_lambda_a', 'smooth_lifted_rlo']
     else:
         optimizers = [args.optimizer]
     
     results = {}
     for opt in optimizers:
         try:
-            results[opt] = train_classification(
-                args.model, opt, Path(args.data), output_dir, 
-                args.epochs, rank, world_size, device, logger
-            )
+            results[opt] = train_classification(opt, Path(args.data), output_dir, args.epochs, rank, world_size, device, logger)
             if rank == 0:
-                with open(output_dir / f'{args.model}_{opt}_results.json', 'w') as f:
+                with open(output_dir / f'{opt}_results.json', 'w') as f:
                     json.dump(results[opt], f, indent=2)
         except Exception as e:
             if rank == 0:
@@ -487,7 +345,7 @@ def main():
     
     if rank == 0:
         logger.info("\n" + "=" * 70)
-        logger.info(f"{args.model.upper()} RESULTS (Top-1 Accuracy ↑)")
+        logger.info("ViT-B/16 RESULTS (Top-1 Accuracy ↑)")
         logger.info("=" * 70)
         for opt in sorted(results.keys(), key=lambda x: -results[x].get('best_acc', 0)):
             acc = results[opt].get('best_acc', 0)

@@ -1,5 +1,4 @@
-test.*
-test1.*
+test*
 data/
 *.json
 *.png
@@ -14,4 +13,6 @@ results_classification/
 *.log
 *.npz
 *.sh
-
+*logs/
+*.sbatch
+sbatchs/
