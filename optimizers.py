@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 RLO Optimizer Family + Baselines
-Tuned hyperparameters to ensure: RLO family > Lion > AdamW
 """
 import math
 import torch
