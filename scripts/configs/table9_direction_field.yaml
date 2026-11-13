@@ -1,0 +1,18 @@
+name: table9_direction_field
+base:
+  protocol: ablation
+  optimizer: rlo_lifted
+  eta: 0.7
+  weight_decay: 0.1
+  lambda_b: 0.2
+  gamma: 5.0
+  betas: [0.9, 0.99]
+  seed: 42
+  epochs: 50
+  batch_size: 128
+  name_keys: [field, use_global_norm, lr]
+grid:
+  field: [tanh, sign]
+runs:
+  - {use_global_norm: true, lr: 1.0e-4}
+  - {use_global_norm: false, lr: 3.0e-3}

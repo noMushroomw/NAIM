@@ -1,0 +1,17 @@
+name: figure2_sensitivity
+base:
+  protocol: ablation
+  optimizer: rlo_lifted
+  field: tanh
+  weight_decay: 0.1
+  lambda_b: 0.2
+  gamma: 5.0
+  betas: [0.9, 0.99]
+  seed: 42
+  epochs: 30
+  name_keys: [eta, use_global_norm, lr, batch_size]
+grid:
+  eta: [0.7, 1.0]
+  use_global_norm: [true, false]
+  lr: [3.0e-5, 1.0e-4, 3.0e-4, 1.0e-3, 3.0e-3, 1.0e-2]
+  batch_size: [32, 64, 128, 256, 512]

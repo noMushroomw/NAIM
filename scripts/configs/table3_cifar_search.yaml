@@ -1,0 +1,24 @@
+name: table3_cifar_search
+base:
+  protocol: recipe
+  seed: 42
+  epochs: 30
+  eval_every: 30
+  betas: [0.9, 0.99]
+  lambda_b: 0.2
+  gamma: 5.0
+  eta: 0.7
+  name_keys: [optimizer, lr, seed]
+runs:
+  - {optimizer: adamw, lr: 3.0e-4, weight_decay: 0.1, betas: [0.9, 0.999]}
+  - {optimizer: adamw, lr: 1.0e-3, weight_decay: 0.1, betas: [0.9, 0.999]}
+  - {optimizer: adamw, lr: 3.0e-3, weight_decay: 0.1, betas: [0.9, 0.999]}
+  - {optimizer: lion, lr: 1.0e-4, weight_decay: 1.0}
+  - {optimizer: lion, lr: 3.0e-4, weight_decay: 1.0}
+  - {optimizer: lion, lr: 1.0e-3, weight_decay: 1.0}
+  - {optimizer: rlo_lambda, lr: 3.0e-4, weight_decay: 0.1}
+  - {optimizer: rlo_lambda, lr: 1.0e-3, weight_decay: 0.1}
+  - {optimizer: rlo_lambda, lr: 3.0e-3, weight_decay: 0.1}
+  - {optimizer: rlo_lifted, lr: 3.0e-5, weight_decay: 0.1}
+  - {optimizer: rlo_lifted, lr: 1.0e-4, weight_decay: 0.1}
+  - {optimizer: rlo_lifted, lr: 3.0e-4, weight_decay: 0.1}

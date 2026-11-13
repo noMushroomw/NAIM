@@ -1,0 +1,18 @@
+name: table10_eta_sweep
+base:
+  protocol: ablation
+  optimizer: rlo_lifted
+  field: tanh
+  use_global_norm: true
+  lr: 1.0e-4
+  weight_decay: 0.1
+  lambda_b: 0.1
+  gamma: 5.0
+  betas: [0.9, 0.99]
+  seed: 42
+  epochs: 50
+  batch_size: 128
+  naim_interval: 10
+  name_keys: [eta]
+grid:
+  eta: [0.1, 0.2, 0.3, 0.5, 0.7, 1.0]

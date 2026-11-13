@@ -1,0 +1,19 @@
+name: table1_mechanism_diagnostics
+base:
+  protocol: diagnostics
+  optimizer: rlo_lifted
+  eta: 0.7
+  use_global_norm: false
+  belief_norm: global
+  weight_decay: 0.1
+  lambda_b: 0.2
+  gamma: 5.0
+  betas: [0.9, 0.99]
+  epochs: 50
+  batch_size: 128
+  naim_interval: 1
+  name_keys: [field, lr, seed]
+grid:
+  field: [tanh, sign]
+  lr: [3.0e-4, 1.0e-3, 3.0e-3, 1.0e-2]
+  seed: [0, 1, 2]

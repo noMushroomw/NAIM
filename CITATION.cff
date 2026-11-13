@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper below."
+title: "Riemannian Lyapunov Framework: Optimization as Closed Loop Control on Riemannian Manifolds"
+authors:
+  - family-names: Wang
+    given-names: Yixuan
+  - family-names: Patil
+    given-names: Omkar Sudhir
+  - family-names: Dixon
+    given-names: Warren E.
+license: MIT
+preferred-citation:
+  type: conference-paper
+  title: "Riemannian Lyapunov Framework: Optimization as Closed Loop Control on Riemannian Manifolds"
+  authors:
+    - family-names: Wang
+      given-names: Yixuan
+    - family-names: Patil
+      given-names: Omkar Sudhir
+    - family-names: Dixon
+      given-names: Warren E.
+  collection-title: "Advances in Neural Information Processing Systems"
+  year: 2026
+  identifiers:
+    - type: other
+      value: "arXiv:2601.22284"

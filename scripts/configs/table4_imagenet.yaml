@@ -1,0 +1,33 @@
+name: table4_imagenet
+base:
+  model: vit_b16
+  optimizer: rlo_lambda
+  epochs: 90
+  batch_size: 128
+  warmup_epochs: 5
+  eval_every: 10
+  data_root: data/imagenet
+  betas: [0.9, 0.99]
+  lambda_b: 0.2
+  gamma: 5.0
+  beta3: 0.99
+  eta: 0.7
+hparams:
+  resnet50:
+    adamw:      {lr: 1.0e-3, weight_decay: 0.05, betas: [0.9, 0.999]}
+    lion:       {lr: 1.0e-4, weight_decay: 0.5}
+    rlo:        {lr: 1.0e-4, weight_decay: 0.5}
+    rlo_lambda: {lr: 1.0e-4, weight_decay: 0.5}
+    rlo_lifted: {lr: 1.0e-4, weight_decay: 0.5}
+  vit_s16:
+    adamw:      {lr: 3.0e-3, weight_decay: 0.1, betas: [0.9, 0.999]}
+    lion:       {lr: 3.0e-4, weight_decay: 1.0}
+    rlo:        {lr: 3.0e-4, weight_decay: 1.0}
+    rlo_lambda: {lr: 3.0e-4, weight_decay: 1.0}
+    rlo_lifted: {lr: 3.0e-4, weight_decay: 1.0}
+  vit_b16:
+    adamw:      {lr: 3.0e-3, weight_decay: 0.3, betas: [0.9, 0.999]}
+    lion:       {lr: 3.0e-4, weight_decay: 1.0}
+    rlo:        {lr: 3.5e-4, weight_decay: 1.0}
+    rlo_lambda: {lr: 3.5e-4, weight_decay: 1.0}
+    rlo_lifted: {lr: 3.5e-4, weight_decay: 1.0}

@@ -1,0 +1,24 @@
+name: table5_gpt2
+base:
+  max_steps: 10000
+  batch_size: 12
+  grad_accum: 40
+  warmup_steps: 2000
+  min_lr_ratio: 0.1
+  grad_clip: 1.0
+  eval_mode: random
+  eval_interval: 1000
+  eval_iters: 200
+  warmup_indexing: table5
+  seed: 42
+  lambda_b: 0.2
+  gamma: 5.0
+  beta3: 0.99
+  eta: 0.7
+  name_keys: [optimizer, lr, seed]
+runs:
+  - {optimizer: adamw, lr: 6.0e-4, weight_decay: 0.1, betas: [0.9, 0.95]}
+  - {optimizer: lion, lr: 6.0e-5, weight_decay: 1.0, betas: [0.9, 0.99]}
+  - {optimizer: rlo, lr: 6.0e-5, weight_decay: 1.0, betas: [0.9, 0.99]}
+  - {optimizer: rlo_lambda, lr: 6.0e-5, weight_decay: 1.0, betas: [0.9, 0.99]}
+  - {optimizer: rlo_lifted, lr: 6.0e-5, weight_decay: 1.0, betas: [0.9, 0.99]}

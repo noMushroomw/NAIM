@@ -1,0 +1,28 @@
+name: table2_metric_search
+base:
+  protocol: recipe
+  optimizer: metric_rlo
+  weight_decay: 0.1
+  lambda_b: 0.1
+  gamma: 5.0
+  betas: [0.9, 0.99]
+  seed: 42
+  epochs: 30
+  eval_every: 30
+  name_keys: [metric, lr, seed]
+runs:
+  - {metric: euclidean, lr: 3.0e-2}
+  - {metric: euclidean, lr: 1.0e-1}
+  - {metric: euclidean, lr: 3.0e-1}
+  - {metric: adam, lr: 3.0e-4}
+  - {metric: adam, lr: 1.0e-3}
+  - {metric: adam, lr: 3.0e-3}
+  - {metric: rmsprop, lr: 3.0e-4}
+  - {metric: rmsprop, lr: 1.0e-3}
+  - {metric: rmsprop, lr: 3.0e-3}
+  - {metric: adagrad, lr: 1.0e-3}
+  - {metric: adagrad, lr: 3.0e-3}
+  - {metric: adagrad, lr: 1.0e-2}
+  - {metric: layerwise, lr: 3.0e-4}
+  - {metric: layerwise, lr: 1.0e-3}
+  - {metric: layerwise, lr: 3.0e-3}

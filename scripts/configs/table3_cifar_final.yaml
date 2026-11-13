@@ -1,0 +1,18 @@
+name: table3_cifar_final
+base:
+  protocol: recipe
+  epochs: 50
+  eval_every: 5
+  betas: [0.9, 0.99]
+  lambda_b: 0.2
+  gamma: 5.0
+  eta: 0.7
+  lr_from: table3_cifar_search
+  name_keys: [optimizer, lr, seed]
+grid:
+  seed: [42, 123, 456]
+runs:
+  - {optimizer: adamw, weight_decay: 0.1, betas: [0.9, 0.999]}
+  - {optimizer: lion, weight_decay: 1.0}
+  - {optimizer: rlo_lambda, weight_decay: 0.1}
+  - {optimizer: rlo_lifted, weight_decay: 0.1}

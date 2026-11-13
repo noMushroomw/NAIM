@@ -1,0 +1,19 @@
+name: table2_metric_final
+base:
+  protocol: recipe
+  optimizer: metric_rlo
+  weight_decay: 0.1
+  lambda_b: 0.1
+  gamma: 5.0
+  betas: [0.9, 0.99]
+  epochs: 50
+  eval_every: 5
+  name_keys: [metric, lr, seed]
+grid:
+  seed: [42, 123, 456]
+runs:
+  - {metric: euclidean, lr: 3.0e-2}
+  - {metric: adam, lr: 1.0e-3}
+  - {metric: rmsprop, lr: 3.0e-3}
+  - {metric: adagrad, lr: 1.0e-2}
+  - {metric: layerwise, lr: 3.0e-3}

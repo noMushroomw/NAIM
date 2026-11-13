@@ -1,0 +1,6 @@
+torch>=2.4
+torchvision>=0.19
+numpy>=1.24
+pyyaml>=6.0
+tiktoken>=0.7
+datasets>=3.0
