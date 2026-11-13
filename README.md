@@ -34,7 +34,7 @@ The code contains the three RLO instances used in the experiments and every expe
 RLO, η = 1:
 
 $$
-d_k = \operatorname{sign}(c_k) + b_k
+d_k = \textbf{sign}(c_k) + b_k
 $$
 
 RLO-Λ, η = 1:
