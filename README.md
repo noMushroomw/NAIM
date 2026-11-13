@@ -8,22 +8,66 @@ Official code for the NeurIPS 2026 paper *Riemannian Lyapunov Framework: Optimiz
 
 ## What this repository delivers
 
-The Riemannian Lyapunov Framework (RLF) treats a first order optimizer as a closed loop controlled dynamical system on the parameter manifold. An optimizer is specified by a quadruple $(\mathcal{M}, g, \Phi, \eta)$: a Riemannian metric $g$, an internal state transition, a direction field generator $\Phi$, and a lifting parameter $\eta$. The optimizer carries a velocity state $v_k$ that is driven toward a target direction $d_k$ built from the gradient and the internal memory. The targets form a time indexed family of submanifolds of the extended state space, the Normally Attracting Invariant Manifold (NAIM) family, and training splits into two timescales: the velocity contracts onto the current target at rate $\eta$, then the parameters descend along it. With the residual $z_k = v_k - d_k$ and the target drift $\delta_k = d_{k+1} - d_k$, the fiber contraction gives the exact recurrence
+The Riemannian Lyapunov Framework (RLF) treats a first order optimizer as a closed loop controlled dynamical system on the parameter manifold. An optimizer is specified by a quadruple (M, g, Φ, η): a Riemannian metric g, an internal state transition, a direction field generator Φ, and a lifting parameter η. The optimizer carries a velocity state v that is driven toward a target direction d built from the gradient and the internal memory. The targets form a time indexed family of submanifolds of the extended state space, the Normally Attracting Invariant Manifold (NAIM) family, and training splits into two timescales: the velocity contracts onto the current target at rate η, then the parameters descend along it. With the residual z = v − d and the target drift δ, the fiber contraction gives the exact recurrence
 
-$$z_{k+1} = (1 - \eta)\, z_k - \delta_k ,$$
+$$
+z_{k+1} = (1 - \eta)\, z_k - \delta_k
+$$
 
-and Riemannian backstepping yields a strict Lyapunov function on the extended state space, $V_k = f(\theta_k) - f^\ast + \alpha \lVert z_k \rVert^2$, under which the trajectory is uniformly ultimately bounded. Classical and modern methods, including SGD, Adam, AdamW, Lion and Shampoo, are recovered as particular quadruples (Section 5 and Table 7 of the paper).
+and Riemannian backstepping yields a strict Lyapunov function on the extended state space,
+
+$$
+V_k = f(\theta_k) - f^\ast + \alpha \lVert z_k \rVert^2
+$$
+
+under which the trajectory is uniformly ultimately bounded. Classical and modern methods, including SGD, Adam, AdamW, Lion and Shampoo, are recovered as particular quadruples (Section 5 and Table 7 of the paper).
 
 The code contains the three RLO instances used in the experiments and every experiment of the paper:
 
-| Optimizer | Paper | Class | Update |
-|---|---|---|---|
-| RLO | Algorithm 2 | `scripts.optimizers.RLO` | $d_k = \operatorname{sign}(c_k) + b_k$, $\eta = 1$ |
-| RLO-Λ | Algorithm 3 | `scripts.optimizers.RLOLambda` | $d_k = \sigma_k \big(\tanh(\gamma c_k / \sqrt{s_{k+1}}) + b_k\big)$, $\eta = 1$ |
-| RLO-Lifted | Algorithm 4 | `scripts.optimizers.RLOLifted` | $d_k = \tfrac{\sqrt{D}}{\lVert \tanh(\gamma c_k) \rVert} \tanh(\gamma c_k) + b_k$, $v_{k+1} = (1-\eta) v_k + \eta d_k$ |
-| RLO with metric $g$ | Section 6.2 | `scripts.optimizers.MetricRLO` | $d_k = \tanh(\gamma c_k) + b_k$ on $\tilde g_k = G_k^{-1} g_k$ |
+| Optimizer | Paper | Class |
+|---|---|---|
+| RLO | Algorithm 2 | `scripts.optimizers.RLO` |
+| RLO-Λ | Algorithm 3 | `scripts.optimizers.RLOLambda` |
+| RLO-Lifted | Algorithm 4 | `scripts.optimizers.RLOLifted` |
+| RLO with metric g | Section 6.2 | `scripts.optimizers.MetricRLO` |
 
-Here $c_k = \beta_1 m_k + (1 - \beta_1) g_k$, $b_k = \lambda_b \Delta_k / \lVert \Delta_k \rVert$ is the belief term with $\Delta_k = g_k - m_k$, $m_{k+1} = \beta_2 m_k + (1 - \beta_2) g_k$, and $s_{k+1} = \beta_3 s_k + (1 - \beta_3) g_k^2$. Lion is included as the sign baseline. Each optimizer is the update used for the corresponding experiments.
+RLO, η = 1:
+
+$$
+d_k = \operatorname{sign}(c_k) + b_k
+$$
+
+RLO-Λ, η = 1:
+
+$$
+d_k = \sigma_k \left( \tanh\left(\gamma c_k / \sqrt{s_{k+1}}\right) + b_k \right)
+$$
+
+RLO-Lifted:
+
+$$
+d_k = \frac{\sqrt{D}}{\lVert \tanh(\gamma c_k) \rVert} \tanh(\gamma c_k) + b_k, \qquad v_{k+1} = (1 - \eta)\, v_k + \eta\, d_k
+$$
+
+RLO with metric g:
+
+$$
+d_k = \tanh(\gamma c_k) + b_k \quad \text{on} \quad \tilde g_k = G_k^{-1} g_k
+$$
+
+The shared state is
+
+$$
+\begin{aligned}
+c_k &= \beta_1 m_k + (1 - \beta_1) g_k \\
+\Delta_k &= g_k - m_k \\
+b_k &= \lambda_b \Delta_k / \lVert \Delta_k \rVert \\
+m_{k+1} &= \beta_2 m_k + (1 - \beta_2) g_k \\
+s_{k+1} &= \beta_3 s_k + (1 - \beta_3) g_k^2
+\end{aligned}
+$$
+
+Lion is included as the sign baseline. Each optimizer is the update used for the corresponding experiments.
 
 ## Quick start
 
@@ -49,7 +93,11 @@ for x, y in loader:
     opt.step()
 ```
 
-`RLOLifted(..., naim_interval=N)` records the NAIM quantities $\lVert z_k \rVert$, $\lVert z_k \rVert / \lVert d_k \rVert$, $\cos(v_k, d_k)$ and the drift of $d_k$ every $N$ steps (read them with `opt.pop_naim_log()`), which is how Tables 1 and 10 are measured.
+`RLOLifted(..., naim_interval=N)` records the NAIM quantities below every N steps (read them with `opt.pop_naim_log()`), which is how Tables 1 and 10 are measured.
+
+$$
+\lVert z_k \rVert, \qquad \lVert z_k \rVert / \lVert d_k \rVert, \qquad \cos(v_k, d_k)
+$$
 
 ## Installation
 
@@ -105,8 +153,19 @@ Keys changed with `--set` are added to the result file names, so a shortened tes
 **CIFAR-10.** All CIFAR experiments use ResNet-18 with a 3×3 stride 1 first convolution and no max pooling (11.17M parameters) and batch size 128 unless the config says otherwise. Three protocols are used, selected by `protocol` in each config:
 
 * `recipe` (Tables 2 and 3): cosine schedule with a 5 epoch linear warmup and floor 0.01, weight decay 0.1 (1.0 for Lion), label smoothing 0.1, gradient clipping at 1.0, fp16 autocast, test accuracy every 5 epochs. Learning rates are searched for 30 epochs with seed 42 and selected on the accuracy after the last search epoch; the final runs use seeds 42, 123 and 456 for 50 epochs. `table3_cifar_final.yaml` picks each optimizer's learning rate from the search results automatically.
-* `ablation` (Tables 8 to 10, Figures 2 and 3): RLO-Lifted with a constant learning rate, cross entropy without label smoothing, no clipping, fp32, test accuracy every epoch, seed 42, 50 epochs (30 for Figure 2). The loss standard deviation of Table 9 is taken over all training steps. For Table 10, $\bar r = \lVert v_k - d_k \rVert / \lVert d_k \rVert$, $\cos(v_k, d_k)$ and $\bar q_\perp$ (the component of the change in $d$ orthogonal to $d_k$, relative to $\lVert d_k \rVert$) are recorded every 10 steps from the velocity before the update and averaged over training.
-* `diagnostics` (Table 1): RLO-Lifted without global normalization, $\eta = 0.7$, belief term normalized over the complete parameter vector, constant learning rate, label smoothing 0.1, clipping at 1.0, fp32, a fixed 45k/5k train/validation split and seeds 0, 1, 2. At every step the script records $\lVert z_k \rVert$, $\lVert \delta_k \rVert$ and the loss $f(\theta_k)$ on a fixed probe batch of 256 training images (BatchNorm uses the probe batch statistics, so the probe loss depends on $\theta_k$ only). It reports the mean of $\lVert z_k \rVert$ and $\lVert \delta_k \rVert$ over the second half of training, the mean of $\Delta \hat V_k$ for $\hat V_k = f(\theta_k) + \lVert z_k \rVert^2 / D$ after a 10% burn in, and the mean and maximum of $\hat V_k$ over the last 20% of training.
+* `ablation` (Tables 8 to 10, Figures 2 and 3): RLO-Lifted with a constant learning rate, cross entropy without label smoothing, no clipping, fp32, test accuracy every epoch, seed 42, 50 epochs (30 for Figure 2). The loss standard deviation of Table 9 is taken over all training steps. For Table 10, the quantities below are recorded every 10 steps from the velocity before the update and averaged over training. The last one is the component of the change in d orthogonal to d, relative to the norm of d.
+
+$$
+\bar r = \lVert v_k - d_k \rVert / \lVert d_k \rVert, \qquad \cos(v_k, d_k), \qquad \bar q_\perp
+$$
+
+* `diagnostics` (Table 1): RLO-Lifted without global normalization, η = 0.7, belief term normalized over the complete parameter vector, constant learning rate, label smoothing 0.1, clipping at 1.0, fp32, a fixed 45k/5k train/validation split and seeds 0, 1, 2. At every step the script records the residual norm, the drift norm, and the loss on a fixed probe batch of 256 training images (BatchNorm uses the probe batch statistics, so the probe loss depends on the parameters only).
+
+$$
+\hat V_k = f(\theta_k) + \lVert z_k \rVert^2 / D
+$$
+
+It reports the mean residual and drift norms over the second half of training, the mean of the change in V after a 10% burn in, and the mean and maximum of V over the last 20% of training.
 
 **ImageNet.** One run per (model, optimizer) pair on 8 GPUs:
 
@@ -123,18 +182,7 @@ python -m scripts.train_gpt2 --config scripts/configs/table5_gpt2.yaml --only 3
 python -m scripts.train_gpt2 --config scripts/configs/table11_gpt2_adamw.yaml
 ```
 
-Table 5 evaluates on 200 fresh random batches every 1 000 steps. Table 11 evaluates every 250 steps on 100 batches that are identical for every configuration, and its warmup gives update $i$ the multiplier $i / 2000$ (the Table 5 runs reached the peak one update earlier; `warmup_indexing` in the configs selects either convention).
-
-## Implementation notes
-
-The pseudo-code in the paper states the updates in their cleanest form. Where the code that produced the reported numbers differs, this repository keeps the code and documents the difference.
-
-* **RLO-Λ step scale.** The code scales the update by $\sigma_k = \min\big(\sqrt{D} / \bar g_k,\ 10\big)$, where $\bar g_k$ is an exponential moving average (decay 0.99) of the global gradient norm. With gradient clipping at 1.0, $\bar g_k \le 1$ and $\sigma_k = 10$ at every step, so the scale is a constant factor absorbed into the learning rate. `RLOLambda(scale_mode='sqrt_dim')` implements the ScaleTo$\sqrt{D}$ normalization of Algorithm 3 instead; since it sets the update RMS to one per coordinate (versus about 4 to 5 for the default), it needs a learning rate about 5 times larger to match.
-* **Belief normalization.** $\lVert \Delta_k \rVert$ is taken per parameter tensor in every experiment except Table 1, which normalizes over the complete parameter vector (`RLOLifted(belief_norm='global')`).
-* **Belief coefficient.** The Table 2 runs and the Table 10 diagnostic runs use $\lambda_b = 0.1$; all other CIFAR, GPT-2 and ImageNet runs use $\lambda_b = 0.2$. The ImageNet config follows Appendix G.1 ($\lambda_b = 0.2$, $\gamma = 5$ for RLO-Λ); override with `--set lambda_b=... --set gamma=...` if needed.
-* **Table 10 at η = 1.** At $\eta = 1$ the velocity equals the target ($v_{k+1} = d_k$), and the table reports this first-order limit, $\bar r = 0$ and $\cos(v, d) = 1$; its $\bar q_\perp$ was measured on RLO (Algorithm 2). Running the η = 1 entry of `table10_eta_sweep.yaml` measures the pre-update residual instead, which is not zero.
-* **Table 1 measurements.** The probe loss uses the batch statistics of the fixed probe batch in BatchNorm (running statistics are restored afterwards), so $\hat V_k$ depends on $\theta_k$ only. Tail means of $\lVert z_k \rVert$ and $\lVert \delta_k \rVert$ use the second half of training, the mean of $\Delta \hat V_k$ discards the first 10% of steps, and the tail mean and maximum of $\hat V_k$ use the last 20%.
-* **Weight decay** is decoupled, $\theta \leftarrow \theta - h\,\lambda\,\theta$. RLO, RLO-Λ, Lion and MetricRLO apply it after the parameter step, RLO-Lifted before it, as in the original runs.
+Table 5 evaluates on 200 fresh random batches every 1 000 steps. Table 11 evaluates every 250 steps on 100 batches that are identical for every configuration, and its warmup gives update i the multiplier i / 2000 (the Table 5 runs reached the peak one update earlier; `warmup_indexing` in the configs selects either convention).
 
 ## Repository layout
 
@@ -176,7 +224,17 @@ The pseudo-code in the paper states the updates in their cleanest form. Where th
 
 ## Conventions
 
-Throughout the code and the paper, $D$ is the total number of trainable parameters, $h$ (`lr`) is the step size, $m_k$ is the slow gradient average with decay $\beta_2$, $c_k = \beta_1 m_k + (1 - \beta_1) g_k$ is the fast interpolation fed to the direction field, $\Phi$ (`field`) is $\tanh(\gamma\,\cdot)$ or $\operatorname{sign}(\cdot)$, $b_k$ is the belief term with coefficient $\lambda_b$ (`lambda_b`), $d_k$ is the target direction, $v_k$ is the velocity state, and $\eta$ (`eta`) is the lifting parameter; $\eta = 1$ removes the velocity state ($v_{k+1} = d_k$). Global normalization (`use_global_norm`) rescales $\Phi(c_k)$ to norm $\sqrt{D}$. In all reported results "Best" is the maximum accuracy over the evaluated epochs and "Final" is the accuracy after the last epoch.
+Throughout the code and the paper, D is the total number of trainable parameters and h (`lr`) is the step size. The slow gradient average m, the fast interpolation c, the belief term b, the target direction d, and the velocity v are
+
+$$
+\begin{aligned}
+c_k &= \beta_1 m_k + (1 - \beta_1) g_k \\
+\Phi(c_k) &= \tanh(\gamma c_k) \quad \text{or} \quad \operatorname{sign}(c_k) \\
+v_{k+1} &= (1 - \eta)\, v_k + \eta\, d_k
+\end{aligned}
+$$
+
+η (`eta`) is the lifting parameter. η = 1 removes the velocity state, so the next velocity equals the current target. Global normalization (`use_global_norm`) rescales Φ(c) to norm √D. In all reported results "Best" is the maximum accuracy over the evaluated epochs and "Final" is the accuracy after the last epoch.
 
 ## Citation
 
